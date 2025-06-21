@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { 
   Building2, 
@@ -15,26 +15,23 @@ import {
   Eye,
   Filter,
   Shield,
-  Phone,
-  Mail,
-  Calendar,
-  IdCard
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import { 
   collection, 
-  doc, 
   getDocs, 
   addDoc, 
   updateDoc, 
   deleteDoc, 
+  doc, 
   query, 
   where, 
   orderBy,
+  writeBatch,
   serverTimestamp,
-  onSnapshot,
-  getCountFromServer
+  onSnapshot
 } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
 import { useAuth } from '@/contexts/AuthContext';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Button } from '@/components/ui/button';
@@ -84,313 +81,262 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import {
-  Alert,
-  AlertDescription,
-} from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { db } from '@/lib/firebase';
 import { toast } from '@/hooks/use-toast';
+
+interface LocalGovt {
+  id: string;
+  name: string;
+  state?: string;
+  createdAt?: Date;
+}
 
 interface Ward {
   id: string;
   name: string;
   description?: string;
-  zoneId: string;
+  localGovtId: string;
+  localGovtName?: string;
   adminId?: string;
-  createdAt: any;
-  updatedAt: any;
-}
-
-interface Zone {
-  id: string;
-  name: string;
-  description?: string;
-  adminId?: string;
-  createdAt: any;
-  updatedAt: any;
+  adminName?: string;
+  createdAt: Date;
+  updatedAt: Date;
+  createdBy: string;
 }
 
 interface WardWithStats extends Ward {
   userCount: number;
   verifiedUsers: number;
   pendingUsers: number;
-  zoneName: string;
+  zoneCount: number;
+}
+
+interface UserData {
+  id: string;
+  wardId?: string;
+  zoneId?: string;
+  verified: boolean;
+  role: string;
+  name: string;
+  email: string;
+  phone?: string;
+  dob?: string;
+  idNumber?: string;
+  idType?: string;
+  localGovt?: string;
+  occupation?: string;
+  qualification?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export default function WardsPage() {
   const { user } = useAuth();
   const [wards, setWards] = useState<WardWithStats[]>([]);
-  const [zones, setZones] = useState<Zone[]>([]);
+  const [localGovts, setLocalGovts] = useState<LocalGovt[]>([]);
+  const [allUsers, setAllUsers] = useState<UserData[]>([]);
   const [filteredWards, setFilteredWards] = useState<WardWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedZone, setSelectedZone] = useState<string>('all');
+  const [selectedLocalGovt, setSelectedLocalGovt] = useState<string>('all');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [selectedWard, setSelectedWard] = useState<WardWithStats | null>(null);
-  const [formData, setFormData] = useState({
+  const [wardFormData, setWardFormData] = useState({
     name: '',
     description: '',
-    zoneId: '',
+    localGovtId: '',
   });
-  const [submitting, setSubmitting] = useState(false);
-
-  // Use refs to track if listeners are already set up
-  const listenersSetup = useRef(false);
-  const initialLoadComplete = useRef(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Role-based permissions
   const isSuperAdmin = user?.role === 'superAdmin';
+  const isWardAdmin = user?.role === 'wardAdmin';
   const isZonalAdmin = user?.role === 'zonalAdmin';
-  const canManageAllZones = isSuperAdmin;
-  const canCreateWards = isSuperAdmin || isZonalAdmin;
 
-  // Get accessible zones based on user role
-  const getAccessibleZones = useCallback(() => {
-    if (isSuperAdmin) {
-      return zones; // Super admin can see all zones
-    }
-    if (isZonalAdmin && user?.zoneId) {
-      return zones.filter(zone => zone.id === user.zoneId); // Zonal admin can only see their zone
-    }
-    return [];
-  }, [zones, isSuperAdmin, isZonalAdmin, user?.zoneId]);
+  // Check permissions
+  const canCreateWards = isSuperAdmin;
+  const canEditAllWards = isSuperAdmin;
+  const canDeleteWards = isSuperAdmin;
 
-  // Check if user can perform action on ward
-  const canPerformAction = useCallback((ward: WardWithStats, action: string) => {
-    if (!user) return false;
-
-    // Super admin can do everything
+  const canEditWard = (ward: WardWithStats) => {
     if (isSuperAdmin) return true;
-
-    // Zonal admin can only manage wards in their zone
-    if (isZonalAdmin) {
-      return ward.zoneId === user.zoneId;
-    }
-
+    if (isWardAdmin && ward.id === user?.wardId) return true;
     return false;
-  }, [user, isSuperAdmin, isZonalAdmin]);
-
-  // Load user counts for a ward
-  const loadWardUserCounts = async (wardId: string) => {
-    try {
-      const usersRef = collection(db, 'users');
-      
-      const [totalResult, verifiedResult, pendingResult] = await Promise.allSettled([
-        getCountFromServer(query(usersRef, where('wardId', '==', wardId))),
-        getCountFromServer(query(usersRef, where('wardId', '==', wardId), where('verified', '==', true))),
-        getCountFromServer(query(usersRef, where('wardId', '==', wardId), where('verified', '==', false)))
-      ]);
-
-      return {
-        userCount: totalResult.status === 'fulfilled' ? totalResult.value.data().count : 0,
-        verifiedUsers: verifiedResult.status === 'fulfilled' ? verifiedResult.value.data().count : 0,
-        pendingUsers: pendingResult.status === 'fulfilled' ? pendingResult.value.data().count : 0,
-      };
-    } catch (error) {
-      console.error('Error loading user counts for ward:', wardId, error);
-      return { userCount: 0, verifiedUsers: 0, pendingUsers: 0 };
-    }
   };
 
-  // Load all data in a single function
-  const loadAllData = useCallback(async () => {
-    if (!user) {
-      setLoading(false);
-      return;
+  const canViewWard = (ward: WardWithStats) => {
+    if (isSuperAdmin) return true;
+    if (isWardAdmin && ward.id === user?.wardId) return true;
+    if (isZonalAdmin) {
+      // Zonal admin can view their ward
+      return ward.id === user?.wardId;
     }
+    return false;
+  };
 
-    try {
-      console.log(`Loading all data for ${user.role}...`);
-      setLoading(true);
-
-      // Load zones first
-      const zonesRef = collection(db, 'zones');
-      let zonesQuery = query(zonesRef, orderBy('createdAt', 'desc'));
-
-      // Filter zones based on user role
-      if (isZonalAdmin && user?.zoneId) {
-        zonesQuery = query(zonesRef, where('__name__', '==', user.zoneId));
-      }
-
-      const zonesSnapshot = await getDocs(zonesQuery);
-      const zonesData: Zone[] = zonesSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      } as Zone));
-
-      console.log(`Zones loaded: ${zonesData.length}`);
-      setZones(zonesData);
-
-      // Load wards with zone filtering
-      const wardsRef = collection(db, 'wards');
-      let wardsQuery = query(wardsRef, orderBy('createdAt', 'desc'));
-
-      if (isZonalAdmin && user?.zoneId) {
-        wardsQuery = query(wardsRef, where('zoneId', '==', user.zoneId), orderBy('createdAt', 'desc'));
-      }
-
-      const wardsSnapshot = await getDocs(wardsQuery);
-      
-      if (wardsSnapshot.empty) {
-        console.log('No wards found');
-        setWards([]);
-        setFilteredWards([]);
-        setLoading(false);
-        initialLoadComplete.current = true;
-        return;
-      }
-
-      // Process wards with user counts in batches
-      const wardsData: WardWithStats[] = [];
-      const batchSize = 3; // Smaller batch size to prevent overwhelming Firebase
-      
-      for (let i = 0; i < wardsSnapshot.docs.length; i += batchSize) {
-        const batch = wardsSnapshot.docs.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (wardDoc) => {
-          const wardData = { id: wardDoc.id, ...wardDoc.data() } as Ward;
-          
-          // Get zone name
-          const zone = zonesData.find(z => z.id === wardData.zoneId);
-          
-          // Load user counts
-          const userCounts = await loadWardUserCounts(wardDoc.id);
-          
-          return {
-            ...wardData,
-            ...userCounts,
-            zoneName: zone?.name || 'Unknown Zone',
-          };
-        });
-
-        const batchResults = await Promise.all(batchPromises);
-        wardsData.push(...batchResults);
-      }
-      
-      console.log(`Wards loaded: ${wardsData.length}`);
-      setWards(wardsData);
-      setFilteredWards(wardsData);
-      setLoading(false);
-      initialLoadComplete.current = true;
-    } catch (error) {
-      console.error('Error loading data:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load data. Please refresh the page.",
-        variant: "destructive",
-      });
-      setLoading(false);
-      initialLoadComplete.current = true;
-    }
-  }, [user, isZonalAdmin]);
-
-  // Initial data load
   useEffect(() => {
-    if (user && !initialLoadComplete.current) {
-      loadAllData();
-    }
-  }, [user, loadAllData]);
+    loadData();
+  }, []);
 
-  // Set up real-time listeners only once after initial load
-  useEffect(() => {
-    if (!user || !initialLoadComplete.current || listenersSetup.current) return;
-
-    console.log('Setting up real-time listeners...');
-    listenersSetup.current = true;
-
-    const unsubscribers: (() => void)[] = [];
-
-    try {
-      // Listen to wards changes
-      const wardsRef = collection(db, 'wards');
-      let wardsQuery = query(wardsRef, orderBy('createdAt', 'desc'));
-
-      if (isZonalAdmin && user?.zoneId) {
-        wardsQuery = query(wardsRef, where('zoneId', '==', user.zoneId), orderBy('createdAt', 'desc'));
-      }
-      
-      const unsubscribeWards = onSnapshot(
-        wardsQuery, 
-        (snapshot) => {
-          if (!snapshot.metadata.fromCache && snapshot.docChanges().length > 0) {
-            console.log('Wards collection changed, reloading...');
-            // Debounce the reload to avoid too many calls
-            setTimeout(() => {
-              if (initialLoadComplete.current) {
-                loadAllData();
-              }
-            }, 1000);
-          }
-        },
-        (error) => {
-          console.error('Error in wards listener:', error);
-        }
-      );
-      unsubscribers.push(unsubscribeWards);
-
-      // Listen to zones changes
-      const zonesRef = collection(db, 'zones');
-      let zonesQuery = query(zonesRef, orderBy('createdAt', 'desc'));
-
-      if (isZonalAdmin && user?.zoneId) {
-        zonesQuery = query(zonesRef, where('__name__', '==', user.zoneId));
-      }
-      
-      const unsubscribeZones = onSnapshot(
-        zonesQuery, 
-        (snapshot) => {
-          if (!snapshot.metadata.fromCache && snapshot.docChanges().length > 0) {
-            console.log('Zones collection changed, reloading...');
-            setTimeout(() => {
-              if (initialLoadComplete.current) {
-                loadAllData();
-              }
-            }, 1000);
-          }
-        },
-        (error) => {
-          console.error('Error in zones listener:', error);
-        }
-      );
-      unsubscribers.push(unsubscribeZones);
-
-    } catch (error) {
-      console.error('Error setting up listeners:', error);
-    }
-
-    return () => {
-      console.log('Cleaning up listeners...');
-      unsubscribers.forEach(unsubscribe => unsubscribe());
-      listenersSetup.current = false;
-    };
-  }, [user, isZonalAdmin, loadAllData]);
-
-  // Filter wards based on search and zone selection
   useEffect(() => {
     let filtered = wards;
+
+    // Role-based filtering
+    if (isWardAdmin && user?.wardId) {
+      // Ward admin can only see their ward
+      filtered = filtered.filter(ward => ward.id === user.wardId);
+    } else if (isZonalAdmin && user?.wardId) {
+      // Zonal admin can only see their ward
+      filtered = filtered.filter(ward => ward.id === user.wardId);
+    }
 
     // Search filter
     if (searchTerm) {
       filtered = filtered.filter(ward =>
         ward.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         ward.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        ward.zoneName.toLowerCase().includes(searchTerm.toLowerCase())
+        ward.localGovtName?.toLowerCase().includes(searchTerm.toLowerCase())
       );
     }
 
-    // Zone filter
-    if (selectedZone !== 'all') {
-      filtered = filtered.filter(ward => ward.zoneId === selectedZone);
+    // Local Government filter
+    if (selectedLocalGovt !== 'all') {
+      filtered = filtered.filter(ward => ward.localGovtId === selectedLocalGovt);
     }
 
     setFilteredWards(filtered);
-  }, [wards, searchTerm, selectedZone]);
+  }, [wards, searchTerm, selectedLocalGovt, user, isWardAdmin, isZonalAdmin]);
 
-  // Create new ward with role-based zone restriction
+  const calculateUserStats = (wardId: string) => {
+    const usersInWard = allUsers.filter(user => user.wardId === wardId);
+    const totalUsers = usersInWard.length;
+    const verifiedUsers = usersInWard.filter(user => user.verified === true).length;
+    const pendingUsers = usersInWard.filter(user => user.verified === false).length;
+
+    return { totalUsers, verifiedUsers, pendingUsers };
+  };
+
+  const calculateZoneCount = async (wardId: string) => {
+    try {
+      const zonesSnapshot = await getDocs(
+        query(collection(db, 'zones'), where('wardId', '==', wardId))
+      );
+      return zonesSnapshot.docs.length;
+    } catch (error) {
+      console.error('Error counting zones:', error);
+      return 0;
+    }
+  };
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      // Load local governments
+      console.log('Loading local governments...');
+      const localGovtsSnapshot = await getDocs(
+        query(collection(db, 'localGovt'), orderBy('name'))
+      );
+      const localGovtsData = localGovtsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate(),
+      })) as LocalGovt[];
+      
+      console.log('Loaded local governments:', localGovtsData.length);
+      setLocalGovts(localGovtsData);
+
+      // Load all users first
+      console.log('Loading users...');
+      const usersSnapshot = await getDocs(collection(db, 'users'));
+      const usersData = usersSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate(),
+      })) as UserData[];
+      
+      console.log('Loaded users:', usersData.length);
+      setAllUsers(usersData);
+
+      // Load wards based on user role
+      let wardsQuery;
+      if (isWardAdmin && user?.wardId) {
+        // Ward admin can only see their ward
+        wardsQuery = query(
+          collection(db, 'wards'),
+          where('__name__', '==', user.wardId)
+        );
+      } else if (isZonalAdmin && user?.wardId) {
+        // Zonal admin can only see their ward
+        wardsQuery = query(
+          collection(db, 'wards'),
+          where('__name__', '==', user.wardId)
+        );
+      } else {
+        // Super admin can see all wards
+        wardsQuery = query(collection(db, 'wards'), orderBy('createdAt', 'desc'));
+      }
+      
+      const wardsSnapshot = await getDocs(wardsQuery);
+      const wardsData = await Promise.all(
+        wardsSnapshot.docs.map(async (wardDoc) => {
+          const wardData = {
+            id: wardDoc.id,
+            ...wardDoc.data(),
+            createdAt: wardDoc.data().createdAt?.toDate() || new Date(),
+            updatedAt: wardDoc.data().updatedAt?.toDate() || new Date(),
+          } as Ward;
+
+          // Get local government name
+          const localGovt = localGovtsData.find(lg => lg.id === wardData.localGovtId);
+          
+          // Calculate user stats for this ward
+          const wardStats = calculateUserStats(wardDoc.id);
+          
+          // Calculate zone count for this ward
+          const zoneCount = await calculateZoneCount(wardDoc.id);
+
+          // Get admin name if assigned
+          let adminName = '';
+          if (wardData.adminId) {
+            const adminUser = usersData.find(u => u.id === wardData.adminId);
+            adminName = adminUser?.name || 'Unknown Admin';
+          }
+
+          return {
+            ...wardData,
+            localGovtName: localGovt?.name || 'Unknown Local Government',
+            adminName,
+            userCount: wardStats.totalUsers,
+            verifiedUsers: wardStats.verifiedUsers,
+            pendingUsers: wardStats.pendingUsers,
+            zoneCount,
+          } as WardWithStats;
+        })
+      );
+
+      console.log('Loaded wards with stats:', wardsData);
+      setWards(wardsData);
+      setFilteredWards(wardsData);
+
+    } catch (error) {
+      console.error('Error loading data:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load ward data. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleCreateWard = async () => {
-    if (!formData.name.trim() || !formData.zoneId) {
+    if (!wardFormData.name.trim() || !wardFormData.localGovtId) {
       toast({
         title: "Validation Error",
         description: "Please fill in all required fields.",
@@ -398,42 +344,29 @@ export default function WardsPage() {
       });
       return;
     }
-    
-    // Validate zone access for zonal admin
-    if (isZonalAdmin && formData.zoneId !== user?.zoneId) {
-      toast({
-        title: "Error",
-        description: "You can only create wards in your assigned zone.",
-        variant: "destructive",
-      });
-      return;
-    }
-    
-    setSubmitting(true);
+
+    setIsSubmitting(true);
     try {
       const wardData = {
-        name: formData.name.trim(),
-        description: formData.description.trim() || null,
-        zoneId: formData.zoneId,
+        name: wardFormData.name.trim(),
+        description: wardFormData.description.trim() || null,
+        localGovtId: wardFormData.localGovtId,
         adminId: null, // Will be assigned later
+        createdBy: user?.id,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
-      
-      console.log('Creating ward with data:', wardData);
-      const docRef = await addDoc(collection(db, 'wards'), wardData);
-      console.log('Ward created with ID:', docRef.id);
-      
-      setFormData({ name: '', description: '', zoneId: '' });
-      setIsCreateDialogOpen(false);
-      
+
+      await addDoc(collection(db, 'wards'), wardData);
+
       toast({
         title: "Success",
         description: "Ward created successfully.",
       });
 
-      // Reload data after a short delay
-      setTimeout(() => loadAllData(), 500);
+      setWardFormData({ name: '', description: '', localGovtId: '' });
+      setIsCreateDialogOpen(false);
+      await loadData();
     } catch (error) {
       console.error('Error creating ward:', error);
       toast({
@@ -442,13 +375,12 @@ export default function WardsPage() {
         variant: "destructive",
       });
     } finally {
-      setSubmitting(false);
+      setIsSubmitting(false);
     }
   };
 
-  // Update existing ward with permission check
   const handleEditWard = async () => {
-    if (!selectedWard || !formData.name.trim() || !formData.zoneId) {
+    if (!selectedWard || !wardFormData.name.trim() || !wardFormData.localGovtId) {
       toast({
         title: "Validation Error",
         description: "Please fill in all required fields.",
@@ -456,50 +388,25 @@ export default function WardsPage() {
       });
       return;
     }
-    
-    // Check permissions
-    if (!canPerformAction(selectedWard, 'edit')) {
-      toast({
-        title: "Error",
-        description: "You don't have permission to edit this ward.",
-        variant: "destructive",
-      });
-      return;
-    }
 
-    // Validate zone access for zonal admin
-    if (isZonalAdmin && formData.zoneId !== user?.zoneId) {
-      toast({
-        title: "Error",
-        description: "You can only assign wards to your zone.",
-        variant: "destructive",
-      });
-      return;
-    }
-    
-    setSubmitting(true);
+    setIsSubmitting(true);
     try {
-      const wardRef = doc(db, 'wards', selectedWard.id);
-      const updateData = {
-        name: formData.name.trim(),
-        description: formData.description.trim() || null,
-        zoneId: formData.zoneId,
+      await updateDoc(doc(db, 'wards', selectedWard.id), {
+        name: wardFormData.name.trim(),
+        description: wardFormData.description.trim() || null,
+        localGovtId: wardFormData.localGovtId,
         updatedAt: serverTimestamp(),
-      };
-      
-      await updateDoc(wardRef, updateData);
-      
-      setFormData({ name: '', description: '', zoneId: '' });
-      setSelectedWard(null);
-      setIsEditDialogOpen(false);
-      
+      });
+
       toast({
         title: "Success",
         description: "Ward updated successfully.",
       });
 
-      // Reload data after a short delay
-      setTimeout(() => loadAllData(), 500);
+      setWardFormData({ name: '', description: '', localGovtId: '' });
+      setSelectedWard(null);
+      setIsEditDialogOpen(false);
+      await loadData();
     } catch (error) {
       console.error('Error updating ward:', error);
       toast({
@@ -508,32 +415,49 @@ export default function WardsPage() {
         variant: "destructive",
       });
     } finally {
-      setSubmitting(false);
+      setIsSubmitting(false);
     }
   };
 
-  // Delete ward with permission check
   const handleDeleteWard = async (wardId: string) => {
     const ward = wards.find(w => w.id === wardId);
-    if (!ward || !canPerformAction(ward, 'delete')) {
-      toast({
-        title: "Error",
-        description: "You don't have permission to delete this ward.",
-        variant: "destructive",
-      });
-      return;
-    }
+    if (!ward) return;
 
+    setIsSubmitting(true);
     try {
-      await deleteDoc(doc(db, 'wards', wardId));
+      const batch = writeBatch(db);
+
+      // Delete all zones in this ward
+      const zonesSnapshot = await getDocs(
+        query(collection(db, 'zones'), where('wardId', '==', wardId))
+      );
       
+      zonesSnapshot.docs.forEach((zoneDoc) => {
+        batch.delete(doc(db, 'zones', zoneDoc.id));
+      });
+
+      // Update users in this ward to remove wardId
+      const usersInWard = allUsers.filter(user => user.wardId === wardId);
+      usersInWard.forEach(user => {
+        const userRef = doc(db, 'users', user.id);
+        batch.update(userRef, {
+          wardId: null,
+          zoneId: null, // Also remove zone assignment
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+      // Delete the ward
+      batch.delete(doc(db, 'wards', wardId));
+
+      await batch.commit();
+
       toast({
         title: "Success",
-        description: "Ward deleted successfully.",
+        description: "Ward and related data deleted successfully.",
       });
 
-      // Reload data after a short delay
-      setTimeout(() => loadAllData(), 500);
+      await loadData();
     } catch (error) {
       console.error('Error deleting ward:', error);
       toast({
@@ -541,11 +465,13 @@ export default function WardsPage() {
         description: "Failed to delete ward. Please try again.",
         variant: "destructive",
       });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const openEditDialog = (ward: WardWithStats) => {
-    if (!canPerformAction(ward, 'edit')) {
+    if (!canEditWard(ward)) {
       toast({
         title: "Error",
         description: "You don't have permission to edit this ward.",
@@ -555,10 +481,10 @@ export default function WardsPage() {
     }
 
     setSelectedWard(ward);
-    setFormData({
+    setWardFormData({
       name: ward.name,
       description: ward.description || '',
-      zoneId: ward.zoneId,
+      localGovtId: ward.localGovtId,
     });
     setIsEditDialogOpen(true);
   };
@@ -573,21 +499,33 @@ export default function WardsPage() {
       return;
     }
 
-    // Pre-select zone for zonal admin
-    const initialZoneId = isZonalAdmin ? user?.zoneId || '' : '';
-    setFormData({ name: '', description: '', zoneId: initialZoneId });
+    setWardFormData({ name: '', description: '', localGovtId: '' });
     setIsCreateDialogOpen(true);
   };
 
-  const accessibleZones = getAccessibleZones();
+  // Get available local governments for filtering (based on user's access)
+  const getAvailableLocalGovts = () => {
+    if (isSuperAdmin) {
+      return localGovts; // Super admin can see all
+    }
+    
+    // For ward/zonal admins, filter based on their ward's local government
+    const userWards = wards.filter(ward => 
+      (isWardAdmin && ward.id === user?.wardId) ||
+      (isZonalAdmin && ward.id === user?.wardId)
+    );
+    
+    const userLocalGovtIds = userWards.map(ward => ward.localGovtId);
+    return localGovts.filter(lg => userLocalGovtIds.includes(lg.id));
+  };
 
   if (loading) {
     return (
       <DashboardLayout>
         <div className="space-y-6">
           <div className="h-8 bg-gray-200 rounded w-1/4 animate-pulse"></div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
               <Card key={i} className="animate-pulse">
                 <CardContent className="p-6">
                   <div className="h-4 bg-gray-200 rounded w-1/2 mb-2"></div>
@@ -609,42 +547,56 @@ export default function WardsPage() {
   const totalStats = {
     totalWards: wards.length,
     totalUsers: wards.reduce((sum, ward) => sum + ward.userCount, 0),
-    totalZones: accessibleZones.length,
+    verifiedUsers: wards.reduce((sum, ward) => sum + ward.verifiedUsers, 0),
+    totalZones: wards.reduce((sum, ward) => sum + ward.zoneCount, 0),
   };
 
   // Role-based title and description
   const getRoleBasedTitle = () => {
     if (isSuperAdmin) {
-      return 'Ward Management - All Zones';
+      return 'Ward Management - System Wide';
+    }
+    if (isWardAdmin) {
+      const wardName = wards.find(w => w.id === user?.wardId)?.name || 'Ward';
+      return `Ward Management - ${wardName}`;
     }
     if (isZonalAdmin) {
-      const zoneName = zones.find(z => z.id === user?.zoneId)?.name || 'Zone';
-      return `Ward Management - ${zoneName}`;
+      const wardName = wards.find(w => w.id === user?.wardId)?.name || 'Ward';
+      return `Ward Information - ${wardName}`;
     }
     return 'Ward Management';
   };
 
   const getRoleBasedDescription = () => {
     if (isSuperAdmin) {
-      return 'Manage wards across all zones and view comprehensive statistics';
+      return 'Manage wards across all local governments with real-time user statistics';
+    }
+    if (isWardAdmin) {
+      return 'Manage your ward and view user statistics within your jurisdiction';
     }
     if (isZonalAdmin) {
-      return 'Manage wards within your assigned zone';
+      return 'View information about your ward and its statistics';
     }
-    return 'Manage wards under zones and view statistics';
+    return 'Manage wards and view statistics';
   };
 
   return (
     <DashboardLayout>
       <div className="space-y-8">
-        {/* Role-based access notification */}
-        {isZonalAdmin && (
-          <Alert className="border-blue-200 bg-blue-50">
-            <Shield className="h-4 w-4 text-blue-600" />
-            <AlertDescription className="text-blue-800">
-              You have zonal admin access. You can only create and manage wards within your assigned zone: <strong>{zones.find(z => z.id === user?.zoneId)?.name || 'Unknown Zone'}</strong>
-            </AlertDescription>
-          </Alert>
+        {/* Role-based access notice */}
+        {!isSuperAdmin && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <Alert className="border-blue-200 bg-blue-50">
+              <Shield className="h-4 w-4 text-blue-600" />
+              <AlertDescription className="text-blue-800">
+                {isWardAdmin && 'As a Ward Administrator, you can view and manage your assigned ward.'}
+                {isZonalAdmin && 'As a Zonal Administrator, you can view information about your ward but cannot make changes.'}
+              </AlertDescription>
+            </Alert>
+          </motion.div>
         )}
 
         {/* Header */}
@@ -659,57 +611,55 @@ export default function WardsPage() {
               {getRoleBasedDescription()}
             </p>
           </div>
-          <Button 
-            onClick={openCreateDialog} 
-            disabled={accessibleZones.length === 0 || !canCreateWards}
-            className="bg-blue-600 hover:bg-blue-700"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            Create Ward
-          </Button>
+          <div className="flex items-center space-x-3">
+            <Button
+              variant="outline"
+              onClick={loadData}
+              disabled={loading}
+              className="border-gray-200 hover:bg-gray-50"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </Button>
+            {canCreateWards && (
+              <Button onClick={openCreateDialog} disabled={isSubmitting}>
+                <Plus className="w-4 h-4 mr-2" />
+                Create Ward
+              </Button>
+            )}
+          </div>
         </motion.div>
 
-        {accessibleZones.length === 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <Card className="border-yellow-200 bg-yellow-50">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-2 text-yellow-800">
-                  <AlertTriangle className="h-5 w-5" />
-                  <p className="font-medium">No zones available</p>
-                </div>
-                <p className="text-yellow-700 mt-1">
-                  {isSuperAdmin 
-                    ? 'You need to create zones first before you can create wards.'
-                    : 'No zone has been assigned to your account. Contact your administrator.'}
-                </p>
-              </CardContent>
-            </Card>
-          </motion.div>
-        )}
-
         {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           {[
             {
-              title: 'Total Wards',
+              title: isSuperAdmin ? 'Total Wards' : isWardAdmin ? 'Your Ward' : 'Ward',
               value: totalStats.totalWards,
               icon: Building2,
               color: 'blue',
+              description: isSuperAdmin ? 'Primary divisions' : 'Administrative division',
             },
             {
               title: 'Total Users',
               value: totalStats.totalUsers,
               icon: Users,
               color: 'green',
+              description: isSuperAdmin ? 'All registered' : 'In your ward',
             },
             {
-              title: isSuperAdmin ? 'Total Zones' : 'Assigned Zone',
+              title: 'Verified Users',
+              value: totalStats.verifiedUsers,
+              icon: Users,
+              color: 'emerald',
+              description: 'Approved members',
+            },
+            {
+              title: 'Total Zones',
               value: totalStats.totalZones,
               icon: MapPin,
               color: 'purple',
+              description: 'Under wards',
             },
           ].map((stat, index) => (
             <motion.div
@@ -723,10 +673,11 @@ export default function WardsPage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-600">{stat.title}</p>
-                      <p className="text-3xl font-bold text-gray-900">{stat.value}</p>
+                      <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
+                      <p className="text-xs text-gray-500 mt-1">{stat.description}</p>
                     </div>
                     <div className={`p-3 bg-${stat.color}-50 rounded-full`}>
-                      <stat.icon className={`h-6 w-6 text-${stat.color}-600`} />
+                      <stat.icon className={`h-5 w-5 text-${stat.color}-600`} />
                     </div>
                   </div>
                 </CardContent>
@@ -760,17 +711,17 @@ export default function WardsPage() {
                   />
                 </div>
                 
-                {/* Zone filter - only show if user has access to multiple zones */}
-                {accessibleZones.length > 1 && (
-                  <Select value={selectedZone} onValueChange={setSelectedZone}>
+                {/* Local Government filter - only show if user has access to multiple local governments */}
+                {getAvailableLocalGovts().length > 1 && (
+                  <Select value={selectedLocalGovt} onValueChange={setSelectedLocalGovt}>
                     <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                      <SelectValue placeholder="All Zones" />
+                      <SelectValue placeholder="Filter by Local Government" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">All Zones</SelectItem>
-                      {accessibleZones.map((zone) => (
-                        <SelectItem key={zone.id} value={zone.id}>
-                          {zone.name}
+                      <SelectItem value="all">All Local Governments</SelectItem>
+                      {getAvailableLocalGovts().map((localGovt) => (
+                        <SelectItem key={localGovt.id} value={localGovt.id}>
+                          {localGovt.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -791,20 +742,24 @@ export default function WardsPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Building2 className="h-5 w-5 text-blue-600" />
-                Wards ({filteredWards.length})
+                {isSuperAdmin ? `Wards (${filteredWards.length})` : isWardAdmin ? 'Your Ward' : 'Ward Information'}
               </CardTitle>
             </CardHeader>
             <CardContent>
               {filteredWards.length === 0 ? (
                 <div className="text-center py-12">
                   <Building2 className="mx-auto h-12 w-12 text-gray-400 mb-4" />
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">No wards found</h3>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">
+                    {isWardAdmin || isZonalAdmin ? 'No ward assigned' : 'No wards found'}
+                  </h3>
                   <p className="text-gray-500 mb-4">
-                    {searchTerm || selectedZone !== 'all' 
-                      ? 'Try adjusting your search filters.' 
-                      : 'Get started by creating your first ward.'}
+                    {isWardAdmin || isZonalAdmin
+                      ? 'You have not been assigned to any ward yet.'
+                      : searchTerm || selectedLocalGovt !== 'all'
+                      ? 'Try adjusting your search or filter criteria.'
+                      : 'No wards have been created yet.'}
                   </p>
-                  {accessibleZones.length > 0 && !searchTerm && selectedZone === 'all' && canCreateWards && (
+                  {!searchTerm && selectedLocalGovt === 'all' && canCreateWards && (
                     <Button onClick={openCreateDialog} className="bg-blue-600 hover:bg-blue-700">
                       <Plus className="w-4 h-4 mr-2" />
                       Create Ward
@@ -817,9 +772,10 @@ export default function WardsPage() {
                     <TableHeader>
                       <TableRow className="bg-gray-50">
                         <TableHead className="font-semibold">Ward Name</TableHead>
-                        <TableHead className="font-semibold">Parent Zone</TableHead>
+                        <TableHead className="font-semibold">Local Government</TableHead>
                         <TableHead className="font-semibold">Description</TableHead>
                         <TableHead className="font-semibold">Users</TableHead>
+                        <TableHead className="font-semibold">Zones</TableHead>
                         <TableHead className="font-semibold">Status</TableHead>
                         <TableHead className="font-semibold">Created</TableHead>
                         <TableHead className="text-right font-semibold">Actions</TableHead>
@@ -835,19 +791,23 @@ export default function WardsPage() {
                               </div>
                               <div>
                                 <div className="font-medium text-gray-900">{ward.name}</div>
-                                {ward.adminId && (
-                                  <div className="text-sm text-gray-500 flex items-center gap-1">
-                                    <Shield className="w-3 h-3" />
-                                    Admin assigned
+                                {ward.adminId === user?.id && (
+                                  <div className="text-sm text-green-600 flex items-center">
+                                    <Shield className="w-3 h-3 mr-1" />
+                                    Your ward
+                                  </div>
+                                )}
+                                {ward.adminName && ward.adminId !== user?.id && (
+                                  <div className="text-sm text-gray-500">
+                                    Admin: {ward.adminName}
                                   </div>
                                 )}
                               </div>
                             </div>
                           </TableCell>
                           <TableCell>
-                            <div className="flex items-center space-x-2">
-                              <MapPin className="h-4 w-4 text-gray-400" />
-                              <span className="text-sm font-medium text-gray-700">{ward.zoneName}</span>
+                            <div className="text-sm font-medium text-gray-700">
+                              {ward.localGovtName}
                             </div>
                           </TableCell>
                           <TableCell>
@@ -861,33 +821,33 @@ export default function WardsPage() {
                             <div className="space-y-1">
                               <div className="font-medium text-gray-900">{ward.userCount} total</div>
                               <div className="text-sm text-gray-500">
-                                <span className="text-green-600">{ward.verifiedUsers} verified</span>, <span className="text-yellow-600">{ward.pendingUsers} pending</span>
+                                {ward.verifiedUsers} verified, {ward.pendingUsers} pending
                               </div>
                             </div>
                           </TableCell>
                           <TableCell>
+                            <Badge variant="secondary" className="bg-purple-100 text-purple-800">
+                              {ward.zoneCount} zones
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
                             {ward.adminId ? (
                               <Badge className="bg-green-100 text-green-800 border-green-200">
-                                <Shield className="w-3 h-3 mr-1" />
                                 Active
                               </Badge>
                             ) : (
                               <Badge className="bg-yellow-100 text-yellow-800 border-yellow-200">
-                                <AlertTriangle className="w-3 h-3 mr-1" />
                                 No Admin
                               </Badge>
                             )}
                           </TableCell>
                           <TableCell className="text-sm text-gray-500">
-                            <div className="flex items-center gap-1">
-                              <Calendar className="w-3 h-3" />
-                              {ward.createdAt?.toDate?.()?.toLocaleDateString() || 'N/A'}
-                            </div>
+                            {ward.createdAt?.toLocaleDateString()}
                           </TableCell>
                           <TableCell className="text-right">
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                <Button variant="ghost" size="icon" disabled={isSubmitting}>
                                   <MoreHorizontal className="h-4 w-4" />
                                 </Button>
                               </DropdownMenuTrigger>
@@ -895,131 +855,136 @@ export default function WardsPage() {
                                 <DropdownMenuLabel>Actions</DropdownMenuLabel>
                                 <DropdownMenuSeparator />
                                 
-                                <Dialog>
-                                  <DialogTrigger asChild>
-                                    <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                                      <Eye className="mr-2 h-4 w-4" />
-                                      View Details
-                                    </DropdownMenuItem>
-                                  </DialogTrigger>
-                                  <DialogContent className="max-w-2xl">
-                                    <DialogHeader>
-                                      <DialogTitle className="flex items-center gap-2">
-                                        <Building2 className="h-5 w-5 text-blue-600" />
-                                        Ward Details - {ward.name}
-                                      </DialogTitle>
-                                      <DialogDescription>
-                                        Complete information for this ward
-                                      </DialogDescription>
-                                    </DialogHeader>
-                                    <div className="grid grid-cols-2 gap-6 py-4">
-                                      <div className="space-y-4">
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Ward Name</label>
-                                          <p className="text-gray-900">{ward.name}</p>
+                                {/* View Details */}
+                                {canViewWard(ward) && (
+                                  <Dialog>
+                                    <DialogTrigger asChild>
+                                      <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
+                                        <Eye className="mr-2 h-4 w-4" />
+                                        View Details
+                                      </DropdownMenuItem>
+                                    </DialogTrigger>
+                                    <DialogContent className="max-w-4xl">
+                                      <DialogHeader>
+                                        <DialogTitle className="flex items-center gap-2">
+                                          <Building2 className="h-5 w-5 text-blue-600" />
+                                          Ward Details: {ward.name}
+                                        </DialogTitle>
+                                        <DialogDescription>
+                                          Complete information for this ward
+                                        </DialogDescription>
+                                      </DialogHeader>
+                                      <div className="grid grid-cols-2 gap-6 py-4">
+                                        <div className="space-y-4">
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Ward Name</label>
+                                            <p className="text-gray-900">{ward.name}</p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Local Government</label>
+                                            <p className="text-gray-900">{ward.localGovtName}</p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Description</label>
+                                            <p className="text-gray-900">
+                                              {ward.description || 'No description provided'}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Created</label>
+                                            <p className="text-gray-900">
+                                              {ward.createdAt?.toLocaleDateString()}
+                                            </p>
+                                          </div>
                                         </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Parent Zone</label>
-                                          <p className="text-gray-900">{ward.zoneName}</p>
-                                        </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Description</label>
-                                          <p className="text-gray-900">
-                                            {ward.description || 'No description provided'}
-                                          </p>
-                                        </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Created</label>
-                                          <p className="text-gray-900">
-                                            {ward.createdAt?.toDate?.()?.toLocaleDateString() || 'N/A'}
-                                          </p>
+                                        <div className="space-y-4">
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Total Users</label>
+                                            <p className="text-2xl font-bold text-blue-600">
+                                              {ward.userCount}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Verified Users</label>
+                                            <p className="text-lg font-semibold text-green-600">
+                                              {ward.verifiedUsers}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Pending Users</label>
+                                            <p className="text-lg font-semibold text-yellow-600">
+                                              {ward.pendingUsers}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Total Zones</label>
+                                            <p className="text-lg font-semibold text-purple-600">
+                                              {ward.zoneCount}
+                                            </p>
+                                          </div>
                                         </div>
                                       </div>
-                                      <div className="space-y-4">
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Total Users</label>
-                                          <p className="text-2xl font-bold text-blue-600">
-                                            {ward.userCount}
-                                          </p>
-                                        </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Verified Users</label>
-                                          <p className="text-lg font-semibold text-green-600">
-                                            {ward.verifiedUsers}
-                                          </p>
-                                        </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Pending Users</label>
-                                          <p className="text-lg font-semibold text-yellow-600">
-                                            {ward.pendingUsers}
-                                          </p>
-                                        </div>
-                                        <div>
-                                          <label className="text-sm font-medium text-gray-600">Admin Status</label>
-                                          <p className={`text-sm font-medium ${ward.adminId ? 'text-green-600' : 'text-yellow-600'}`}>
-                                            {ward.adminId ? 'Admin Assigned' : 'No Admin Assigned'}
-                                          </p>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </DialogContent>
-                                </Dialog>
+                                    </DialogContent>
+                                  </Dialog>
+                                )}
                                 
-                                {canPerformAction(ward, 'edit') && (
+                                {canEditWard(ward) && (
                                   <DropdownMenuItem onClick={() => openEditDialog(ward)}>
                                     <Edit className="mr-2 h-4 w-4" />
                                     Edit Ward
                                   </DropdownMenuItem>
                                 )}
-                                
-                                {!canPerformAction(ward, 'edit') && (
+
+                                {!canEditWard(ward) && !canViewWard(ward) && (
                                   <DropdownMenuItem disabled>
-                                    <AlertTriangle className="mr-2 h-4 w-4" />
-                                    No edit permission
+                                    <Lock className="mr-2 h-4 w-4" />
+                                    No Permission
                                   </DropdownMenuItem>
                                 )}
                                 
-                                <DropdownMenuSeparator />
-                                
-                                {canPerformAction(ward, 'delete') && (
-                                  <AlertDialog>
-                                    <AlertDialogTrigger asChild>
-                                      <DropdownMenuItem 
-                                        className="text-red-600"
-                                        onSelect={(e) => e.preventDefault()}
-                                      >
-                                        <Trash2 className="mr-2 h-4 w-4" />
-                                        Delete Ward
-                                      </DropdownMenuItem>
-                                    </AlertDialogTrigger>
-                                    <AlertDialogContent>
-                                      <AlertDialogHeader>
-                                        <AlertDialogTitle className="flex items-center gap-2">
-                                          <AlertTriangle className="h-5 w-5 text-red-600" />
-                                          Delete Ward
-                                        </AlertDialogTitle>
-                                        <AlertDialogDescription>
-                                          Are you sure you want to delete &quot;{ward.name}&quot;?
-                                          {ward.userCount > 0 && (
-                                            <span className="block mt-2 text-red-600 font-medium">
-                                              Warning: This ward contains {ward.userCount} users. 
-                                              All associated user data will be affected.
-                                            </span>
-                                          )}
-                                          This action cannot be undone.
-                                        </AlertDialogDescription>
-                                      </AlertDialogHeader>
-                                      <AlertDialogFooter>
-                                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                        <AlertDialogAction
-                                          onClick={() => handleDeleteWard(ward.id)}
-                                          className="bg-red-600 hover:bg-red-700"
+                                {canDeleteWards && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <AlertDialog>
+                                      <AlertDialogTrigger asChild>
+                                        <DropdownMenuItem 
+                                          className="text-red-600"
+                                          onSelect={(e) => e.preventDefault()}
                                         >
+                                          <Trash2 className="mr-2 h-4 w-4" />
                                           Delete Ward
-                                        </AlertDialogAction>
-                                      </AlertDialogFooter>
-                                    </AlertDialogContent>
-                                  </AlertDialog>
+                                        </DropdownMenuItem>
+                                      </AlertDialogTrigger>
+                                      <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                          <AlertDialogTitle className="flex items-center gap-2">
+                                            <AlertTriangle className="h-5 w-5 text-red-600" />
+                                            Delete Ward
+                                          </AlertDialogTitle>
+                                          <AlertDialogDescription>
+                                            Are you sure you want to delete &quot;{ward.name}&quot;? 
+                                            {ward.userCount > 0 && (
+                                              <span className="block mt-2 text-red-600 font-medium">
+                                                Warning: This ward contains {ward.userCount} users and {ward.zoneCount} zones. 
+                                                All associated data will be affected.
+                                              </span>
+                                            )}
+                                            This action cannot be undone.
+                                          </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                          <AlertDialogAction
+                                            onClick={() => handleDeleteWard(ward.id)}
+                                            className="bg-red-600 hover:bg-red-700"
+                                            disabled={isSubmitting}
+                                          >
+                                            {isSubmitting ? 'Deleting...' : 'Delete Ward'}
+                                          </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                      </AlertDialogContent>
+                                    </AlertDialog>
+                                  </>
                                 )}
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -1035,84 +1000,93 @@ export default function WardsPage() {
         </motion.div>
 
         {/* Create Ward Dialog */}
-        <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Plus className="h-5 w-5 text-blue-600" />
-                Create New Ward
-              </DialogTitle>
-              <DialogDescription>
-                Add a new ward under {isZonalAdmin ? 'your zone' : 'a specific zone'}.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              <div className="space-y-2">
-                <Label htmlFor="parentZone">Parent Zone</Label>
-                <Select 
-                  value={formData.zoneId} 
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, zoneId: value }))}
-                  disabled={submitting || isZonalAdmin} // Disable for zonal admin as it's pre-selected
+        {canCreateWards && (
+          <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Building2 className="h-5 w-5 text-blue-600" />
+                  Create New Ward
+                </DialogTitle>
+                <DialogDescription>
+                  Add a new ward as a primary administrative division under a local government.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4 py-4">
+                <div className="space-y-2">
+                  <Label htmlFor="localGovt">Local Government *</Label>
+                  <Select 
+                    value={wardFormData.localGovtId} 
+                    onValueChange={(value) => setWardFormData(prev => ({ ...prev, localGovtId: value }))}
+                    disabled={isSubmitting}
+                  >
+                    <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
+                      <SelectValue placeholder="Select a local government" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {localGovts.map((localGovt) => (
+                        <SelectItem key={localGovt.id} value={localGovt.id}>
+                          {localGovt.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {localGovts.length === 0 && (
+                    <p className="text-xs text-red-500">
+                      No local governments available. Please create local governments first.
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="wardName">Ward Name *</Label>
+                  <Input
+                    id="wardName"
+                    placeholder="e.g., Ward 1 - Central District"
+                    value={wardFormData.name}
+                    onChange={(e) => setWardFormData(prev => ({ ...prev, name: e.target.value }))}
+                    disabled={isSubmitting}
+                    className="border-gray-200 focus:border-blue-500 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="wardDescription">Description (Optional)</Label>
+                  <Textarea
+                    id="wardDescription"
+                    placeholder="Brief description of the ward..."
+                    value={wardFormData.description}
+                    onChange={(e) => setWardFormData(prev => ({ ...prev, description: e.target.value }))}
+                    disabled={isSubmitting}
+                    className="border-gray-200 focus:border-blue-500 focus:ring-blue-500 resize-none"
+                    rows={3}
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button 
+                  variant="outline" 
+                  onClick={() => setIsCreateDialogOpen(false)}
+                  disabled={isSubmitting}
                 >
-                  <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                    <SelectValue placeholder="Select a zone" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accessibleZones.map((zone) => (
-                      <SelectItem key={zone.id} value={zone.id}>
-                        {zone.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {isZonalAdmin && (
-                  <p className="text-xs text-gray-500">
-                    You can only create wards in your assigned zone.
-                  </p>
-                )}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="wardName">Ward Name</Label>
-                <Input
-                  id="wardName"
-                  placeholder="e.g., Ward 1 - Downtown Core"
-                  value={formData.name}
-                  onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  disabled={submitting}
-                  className="border-gray-200 focus:border-blue-500 focus:ring-blue-500"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="wardDescription">Description (Optional)</Label>
-                <Textarea
-                  id="wardDescription"
-                  placeholder="Brief description of the ward..."
-                  value={formData.description}
-                  onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
-                  disabled={submitting}
-                  className="border-gray-200 focus:border-blue-500 focus:ring-blue-500 resize-none"
-                  rows={3}
-                />
-              </div>
-            </div>
-            <DialogFooter>
-              <Button 
-                variant="outline" 
-                onClick={() => setIsCreateDialogOpen(false)}
-                disabled={submitting}
-              >
-                Cancel
-              </Button>
-              <Button 
-                onClick={handleCreateWard} 
-                disabled={!formData.name.trim() || !formData.zoneId || submitting}
-                className="bg-blue-600 hover:bg-blue-700"
-              >
-                {submitting ? 'Creating...' : 'Create Ward'}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+                  Cancel
+                </Button>
+                <Button 
+                  onClick={handleCreateWard} 
+                  disabled={!wardFormData.name.trim() || !wardFormData.localGovtId || isSubmitting}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create Ward'
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
 
         {/* Edit Ward Dialog */}
         <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
@@ -1123,42 +1097,37 @@ export default function WardsPage() {
                 Edit Ward
               </DialogTitle>
               <DialogDescription>
-                Update details for the ward &quot;{selectedWard?.name}&quot;.
+                Update the ward information and local government assignment.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4 py-4">
               <div className="space-y-2">
-                <Label htmlFor="editParentZone">Parent Zone</Label>
+                <Label htmlFor="editLocalGovt">Local Government *</Label>
                 <Select 
-                  value={formData.zoneId} 
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, zoneId: value }))}
-                  disabled={submitting || isZonalAdmin} // Disable for zonal admin
+                  value={wardFormData.localGovtId} 
+                  onValueChange={(value) => setWardFormData(prev => ({ ...prev, localGovtId: value }))}
+                  disabled={isSubmitting}
                 >
                   <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                    <SelectValue placeholder="Select a zone" />
+                    <SelectValue placeholder="Select a local government" />
                   </SelectTrigger>
                   <SelectContent>
-                    {accessibleZones.map((zone) => (
-                      <SelectItem key={zone.id} value={zone.id}>
-                        {zone.name}
+                    {localGovts.map((localGovt) => (
+                      <SelectItem key={localGovt.id} value={localGovt.id}>
+                        {localGovt.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                {isZonalAdmin && (
-                  <p className="text-xs text-gray-500">
-                    You can only assign wards to your zone.
-                  </p>
-                )}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="editWardName">Ward Name</Label>
+                <Label htmlFor="editWardName">Ward Name *</Label>
                 <Input
                   id="editWardName"
-                  placeholder="e.g., Ward 1 - Downtown Core"
-                  value={formData.name}
-                  onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  disabled={submitting}
+                  placeholder="e.g., Ward 1 - Central District"
+                  value={wardFormData.name}
+                  onChange={(e) => setWardFormData(prev => ({ ...prev, name: e.target.value }))}
+                  disabled={isSubmitting}
                   className="border-gray-200 focus:border-blue-500 focus:ring-blue-500"
                 />
               </div>
@@ -1167,9 +1136,9 @@ export default function WardsPage() {
                 <Textarea
                   id="editWardDescription"
                   placeholder="Brief description of the ward..."
-                  value={formData.description}
-                  onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
-                  disabled={submitting}
+                  value={wardFormData.description}
+                  onChange={(e) => setWardFormData(prev => ({ ...prev, description: e.target.value }))}
+                  disabled={isSubmitting}
                   className="border-gray-200 focus:border-blue-500 focus:ring-blue-500 resize-none"
                   rows={3}
                 />
@@ -1179,16 +1148,23 @@ export default function WardsPage() {
               <Button 
                 variant="outline" 
                 onClick={() => setIsEditDialogOpen(false)}
-                disabled={submitting}
+                disabled={isSubmitting}
               >
                 Cancel
               </Button>
               <Button 
                 onClick={handleEditWard} 
-                disabled={!formData.name.trim() || !formData.zoneId || submitting}
+                disabled={!wardFormData.name.trim() || !wardFormData.localGovtId || isSubmitting}
                 className="bg-blue-600 hover:bg-blue-700"
               >
-                {submitting ? 'Updating...' : 'Update Ward'}
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  'Save Changes'
+                )}
               </Button>
             </DialogFooter>
           </DialogContent>

@@ -46,8 +46,8 @@ export default function HomePage() {
                 <Shield className="h-8 w-8 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">PartyAdmin</h1>
-                <p className="text-sm text-gray-600">Political Party Registration</p>
+                <h1 className="text-2xl font-bold text-gray-900">Logo</h1>
+                <p className="text-sm text-gray-600">hon.akeem amosun political movement</p>
               </div>
             </div>
             <div className="flex items-center space-x-4">
@@ -185,13 +185,13 @@ export default function HomePage() {
             <div className="flex items-center space-x-3">
               <Shield className="h-8 w-8 text-blue-400" />
               <div>
-                <h3 className="text-lg font-bold">PartyAdmin</h3>
-                <p className="text-gray-400 text-sm">Political Party Registration System</p>
+                <h3 className="text-lg font-bold">Logo</h3>
+                <p className="text-gray-400 text-sm">hon.akeem amosun political movement System</p>
               </div>
             </div>
           </div>
           <div className="mt-8 text-center text-gray-400 text-sm">
-            © 2024 PartyAdmin. All rights reserved.
+            © 2024 Logo. All rights reserved.
           </div>
         </div>
       </footer>

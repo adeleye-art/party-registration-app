@@ -26,7 +26,8 @@ import {
   Clock,
   CheckCircle,
   XCircle,
-  RefreshCw
+  RefreshCw,
+  Lock
 } from 'lucide-react';
 import { 
   collection, 
@@ -98,7 +99,6 @@ import {
   AlertDescription,
 } from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/hooks/use-toast';
 
 interface AdminUser {
@@ -120,34 +120,17 @@ interface AdminUser {
   updatedAt: Date;
 }
 
-interface AdminAppointment {
-  id: string;
-  appointeeEmail: string;
-  appointeeName: string;
-  role: 'zonalAdmin' | 'wardAdmin';
-  zoneId?: string;
-  wardId?: string;
-  zoneName?: string;
-  wardName?: string;
-  appointedBy: string;
-  status: 'pending' | 'sent' | 'accepted' | 'expired';
-  createdAt: Date;
-  expiresAt: Date;
-  emailSent: boolean;
-  tempPassword?: string;
-}
-
-interface Zone {
+interface Ward {
   id: string;
   name: string;
   description?: string;
   createdAt: Timestamp;
 }
 
-interface Ward {
+interface Zone {
   id: string;
   name: string;
-  zoneId: string;
+  wardId: string; // Zone belongs to a ward
   description?: string;
   createdAt: Timestamp;
 }
@@ -167,13 +150,13 @@ interface RegularUser {
 export default function AdminManagementPage() {
   const { user } = useAuth();
   const [admins, setAdmins] = useState<AdminUser[]>([]);
-  const [appointments, setAppointments] = useState<AdminAppointment[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
   const [wards, setWards] = useState<Ward[]>([]);
   const [regularUsers, setRegularUsers] = useState<RegularUser[]>([]);
   const [filteredAdmins, setFilteredAdmins] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedWard, setSelectedWard] = useState<string>('all');
   const [selectedZone, setSelectedZone] = useState<string>('all');
   const [selectedRole, setSelectedRole] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -185,54 +168,55 @@ export default function AdminManagementPage() {
   const [appointmentData, setAppointmentData] = useState({
     userId: '',
     role: '' as 'zonalAdmin' | 'wardAdmin' | '',
-    zoneId: '',
     wardId: '',
+    zoneId: '',
   });
   const [editData, setEditData] = useState({
     name: '',
     email: '',
     phone: '',
-    zoneId: '',
     wardId: '',
+    zoneId: '',
   });
   const [submitting, setSubmitting] = useState(false);
 
   // Role-based permissions
   const isSuperAdmin = user?.role === 'superAdmin';
-  const isZonalAdmin = user?.role === 'zonalAdmin';
   const isWardAdmin = user?.role === 'wardAdmin';
+  const isZonalAdmin = user?.role === 'zonalAdmin';
+  
   const canManageAllAdmins = isSuperAdmin;
-  const canManageZonalAdmins = isSuperAdmin;
-  const canManageWardAdmins = isSuperAdmin || isZonalAdmin;
-
-  // Get accessible zones based on user role
-  const getAccessibleZones = useCallback(() => {
-    if (isSuperAdmin) {
-      return zones; // Super admin can see all zones
-    }
-    if (isZonalAdmin && user?.zoneId) {
-      return zones.filter(zone => zone.id === user.zoneId); // Zonal admin can only see their zone
-    }
-    if (isWardAdmin && user?.wardId) {
-      const userWard = wards.find(w => w.id === user.wardId);
-      return zones.filter(zone => zone.id === userWard?.zoneId); // Ward admin can see their zone
-    }
-    return [];
-  }, [zones, wards, isSuperAdmin, isZonalAdmin, isWardAdmin, user]);
+  const canManageWardAdmins = isSuperAdmin || isWardAdmin;
+  const canManageZonalAdmins = isSuperAdmin || isWardAdmin;
 
   // Get accessible wards based on user role
   const getAccessibleWards = useCallback(() => {
     if (isSuperAdmin) {
       return wards; // Super admin can see all wards
     }
-    if (isZonalAdmin && user?.zoneId) {
-      return wards.filter(ward => ward.zoneId === user.zoneId); // Zonal admin can see wards in their zone
-    }
     if (isWardAdmin && user?.wardId) {
       return wards.filter(ward => ward.id === user.wardId); // Ward admin can only see their ward
     }
+    if (isZonalAdmin && user?.zoneId) {
+      const userZone = zones.find(z => z.id === user.zoneId);
+      return wards.filter(ward => ward.id === userZone?.wardId); // Zonal admin can see their ward
+    }
     return [];
-  }, [wards, isSuperAdmin, isZonalAdmin, isWardAdmin, user]);
+  }, [wards, zones, isSuperAdmin, isWardAdmin, isZonalAdmin, user]);
+
+  // Get accessible zones based on user role
+  const getAccessibleZones = useCallback(() => {
+    if (isSuperAdmin) {
+      return zones; // Super admin can see all zones
+    }
+    if (isWardAdmin && user?.wardId) {
+      return zones.filter(zone => zone.wardId === user.wardId); // Ward admin can see zones in their ward
+    }
+    if (isZonalAdmin && user?.zoneId) {
+      return zones.filter(zone => zone.id === user.zoneId); // Zonal admin can only see their zone
+    }
+    return [];
+  }, [zones, isSuperAdmin, isWardAdmin, isZonalAdmin, user]);
 
   // Check if user can perform action on target admin
   const canPerformAction = useCallback((targetAdmin: AdminUser, action: string) => {
@@ -251,20 +235,24 @@ export default function AdminManagementPage() {
       return false;
     }
 
-    // Zonal admin can manage ward admins in their zone
-    if (isZonalAdmin) {
-      const canManageUser = targetAdmin.zoneId === user.zoneId;
-      const canManageRole = targetAdmin.role === 'wardAdmin';
-      return canManageUser && canManageRole;
+    // Ward admin can manage zonal admins in zones under their ward
+    if (isWardAdmin && user?.wardId) {
+      if (targetAdmin.role === 'zonalAdmin') {
+        // Check if the zonal admin's zone is under this ward admin's ward
+        const targetZone = zones.find(z => z.id === targetAdmin.zoneId);
+        return targetZone?.wardId === user.wardId;
+      }
+      // Ward admin cannot manage other ward admins
+      return false;
     }
 
-    // Ward admin cannot manage other admins
-    if (isWardAdmin) {
+    // Zonal admin cannot manage other admins
+    if (isZonalAdmin) {
       return false;
     }
 
     return false;
-  }, [user, isSuperAdmin, isZonalAdmin, isWardAdmin]);
+  }, [user, isSuperAdmin, isWardAdmin, isZonalAdmin, zones]);
 
   // Load all data
   const loadAdminData = useCallback(async () => {
@@ -277,50 +265,28 @@ export default function AdminManagementPage() {
       console.log(`Loading admin data for ${user.role}...`);
       setLoading(true);
 
-      // Load zones
-      const zonesRef = collection(db, 'zones');
-      let zonesQuery = query(zonesRef, orderBy('createdAt', 'desc'));
-
-      if (isZonalAdmin && user?.zoneId) {
-        zonesQuery = query(zonesRef, where('__name__', '==', user.zoneId));
-      } else if (isWardAdmin && user?.wardId) {
-        // For ward admin, get their ward's zone
-        const wardRef = collection(db, 'wards');
-        const wardQuery = query(wardRef, where('__name__', '==', user.wardId));
-        const wardSnapshot = await getDocs(wardQuery);
-        
-        if (!wardSnapshot.empty) {
-          const wardData = wardSnapshot.docs[0].data();
-          zonesQuery = query(zonesRef, where('__name__', '==', wardData.zoneId));
-        }
-      }
-
-      const zonesSnapshot = await getDocs(zonesQuery);
-      const zonesData: Zone[] = zonesSnapshot.docs.map(doc => ({
-        id: doc.id,
-        name: doc.data().name,
-        description: doc.data().description,
-        createdAt: doc.data().createdAt || Timestamp.now(),
-      }));
-
-      console.log(`Zones loaded: ${zonesData.length}`);
-      setZones(zonesData);
-
-      // Load wards
+      // Load wards based on user role
       const wardsRef = collection(db, 'wards');
       let wardsQuery = query(wardsRef, orderBy('createdAt', 'desc'));
 
-      if (isZonalAdmin && user?.zoneId) {
-        wardsQuery = query(wardsRef, where('zoneId', '==', user.zoneId), orderBy('createdAt', 'desc'));
-      } else if (isWardAdmin && user?.wardId) {
+      if (isWardAdmin && user?.wardId) {
         wardsQuery = query(wardsRef, where('__name__', '==', user.wardId));
+      } else if (isZonalAdmin && user?.zoneId) {
+        // For zonal admin, get their zone's ward
+        const zoneRef = collection(db, 'zones');
+        const zoneQuery = query(zoneRef, where('__name__', '==', user.zoneId));
+        const zoneSnapshot = await getDocs(zoneQuery);
+        
+        if (!zoneSnapshot.empty) {
+          const zoneData = zoneSnapshot.docs[0].data();
+          wardsQuery = query(wardsRef, where('__name__', '==', zoneData.wardId));
+        }
       }
 
       const wardsSnapshot = await getDocs(wardsQuery);
       const wardsData: Ward[] = wardsSnapshot.docs.map(doc => ({
         id: doc.id,
         name: doc.data().name,
-        zoneId: doc.data().zoneId,
         description: doc.data().description,
         createdAt: doc.data().createdAt || Timestamp.now(),
       }));
@@ -328,7 +294,29 @@ export default function AdminManagementPage() {
       console.log(`Wards loaded: ${wardsData.length}`);
       setWards(wardsData);
 
-      // Load admin users
+      // Load zones based on user role
+      const zonesRef = collection(db, 'zones');
+      let zonesQuery = query(zonesRef, orderBy('createdAt', 'desc'));
+
+      if (isWardAdmin && user?.wardId) {
+        zonesQuery = query(zonesRef, where('wardId', '==', user.wardId), orderBy('createdAt', 'desc'));
+      } else if (isZonalAdmin && user?.zoneId) {
+        zonesQuery = query(zonesRef, where('__name__', '==', user.zoneId));
+      }
+
+      const zonesSnapshot = await getDocs(zonesQuery);
+      const zonesData: Zone[] = zonesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        name: doc.data().name,
+        wardId: doc.data().wardId,
+        description: doc.data().description,
+        createdAt: doc.data().createdAt || Timestamp.now(),
+      }));
+
+      console.log(`Zones loaded: ${zonesData.length}`);
+      setZones(zonesData);
+
+      // Load admin users based on role
       const usersRef = collection(db, 'users');
       let adminQuery = query(
         usersRef, 
@@ -337,18 +325,29 @@ export default function AdminManagementPage() {
       );
 
       // Apply role-based filtering for admins
-      if (isZonalAdmin && user?.zoneId) {
+      if (isWardAdmin && user?.wardId) {
+        // Ward admin can see zonal admins in zones under their ward
+        const zoneIds = zonesData.map(z => z.id);
+        if (zoneIds.length > 0) {
+          adminQuery = query(
+            usersRef,
+            where('role', '==', 'zonalAdmin'),
+            where('zoneId', 'in', zoneIds),
+            orderBy('createdAt', 'desc')
+          );
+        } else {
+          // No zones under this ward, so no zonal admins to show
+          setAdmins([]);
+          setFilteredAdmins([]);
+          setLoading(false);
+          return;
+        }
+      } else if (isZonalAdmin && user?.zoneId) {
+        // Zonal admin can only see themselves
         adminQuery = query(
           usersRef,
-          where('role', 'in', ['zonalAdmin', 'wardAdmin']),
+          where('role', '==', 'zonalAdmin'),
           where('zoneId', '==', user.zoneId),
-          orderBy('createdAt', 'desc')
-        );
-      } else if (isWardAdmin && user?.wardId) {
-        adminQuery = query(
-          usersRef,
-          where('role', '==', 'wardAdmin'),
-          where('wardId', '==', user.wardId),
           orderBy('createdAt', 'desc')
         );
       }
@@ -383,8 +382,8 @@ export default function AdminManagementPage() {
       setAdmins(adminData);
       setFilteredAdmins(adminData);
 
-      // Load regular users for appointment (only for super admin and zonal admin)
-      if (isSuperAdmin || isZonalAdmin) {
+      // Load regular users for appointment (only for super admin and ward admin)
+      if (isSuperAdmin || isWardAdmin) {
         let regularUsersQuery = query(
           usersRef,
           where('role', '==', 'member'),
@@ -392,12 +391,12 @@ export default function AdminManagementPage() {
           orderBy('createdAt', 'desc')
         );
 
-        if (isZonalAdmin && user?.zoneId) {
+        if (isWardAdmin && user?.wardId) {
           regularUsersQuery = query(
             usersRef,
             where('role', '==', 'member'),
             where('verified', '==', true),
-            where('zoneId', '==', user.zoneId),
+            where('wardId', '==', user.wardId),
             orderBy('createdAt', 'desc')
           );
         }
@@ -421,9 +420,6 @@ export default function AdminManagementPage() {
         console.log(`Regular users loaded: ${regularUsersData.length}`);
         setRegularUsers(regularUsersData);
       }
-
-      // Load appointments (placeholder for now)
-      setAppointments([]);
 
     } catch (error) {
       console.error('Error loading admin data:', error);
@@ -456,6 +452,11 @@ export default function AdminManagementPage() {
       );
     }
 
+    // Ward filter
+    if (selectedWard !== 'all') {
+      filtered = filtered.filter(admin => admin.wardId === selectedWard);
+    }
+
     // Zone filter
     if (selectedZone !== 'all') {
       filtered = filtered.filter(admin => admin.zoneId === selectedZone);
@@ -472,15 +473,15 @@ export default function AdminManagementPage() {
     }
 
     setFilteredAdmins(filtered);
-  }, [admins, searchTerm, selectedZone, selectedRole, selectedStatus]);
+  }, [admins, searchTerm, selectedWard, selectedZone, selectedRole, selectedStatus]);
 
   // Appoint admin
   const handleAppointAdmin = async () => {
     if (
       !appointmentData.userId ||
       !appointmentData.role ||
-      !appointmentData.zoneId ||
-      (appointmentData.role === 'wardAdmin' && !appointmentData.wardId)
+      !appointmentData.wardId ||
+      (appointmentData.role === 'zonalAdmin' && !appointmentData.zoneId)
     ) {
       toast({
         title: "Validation Error",
@@ -509,11 +510,11 @@ export default function AdminManagementPage() {
       return;
     }
 
-    // Validate zone access for zonal admin
-    if (isZonalAdmin && appointmentData.zoneId !== user?.zoneId) {
+    // Validate ward access for ward admin
+    if (isWardAdmin && appointmentData.wardId !== user?.wardId) {
       toast({
         title: "Error",
-        description: "You can only appoint admins in your assigned zone.",
+        description: "You can only appoint admins in your assigned ward.",
         variant: "destructive",
       });
       return;
@@ -524,8 +525,8 @@ export default function AdminManagementPage() {
       const userRef = doc(db, 'users', appointmentData.userId);
       const updateData = {
         role: appointmentData.role,
-        zoneId: appointmentData.zoneId,
-        wardId: appointmentData.wardId || null,
+        wardId: appointmentData.wardId,
+        zoneId: appointmentData.role === 'zonalAdmin' ? appointmentData.zoneId : null,
         appointedBy: user?.id,
         appointedAt: serverTimestamp(),
         status: 'active',
@@ -537,13 +538,13 @@ export default function AdminManagementPage() {
       // Log appointment activity
       await addDoc(collection(db, 'activities'), {
         type: 'admin_appointed',
-        description: `Appointed ${appointmentData.role} for ${zones.find(z => z.id === appointmentData.zoneId)?.name}${appointmentData.wardId ? ` - ${wards.find(w => w.id === appointmentData.wardId)?.name}` : ''}`,
+        description: `Appointed ${appointmentData.role} for ${wards.find(w => w.id === appointmentData.wardId)?.name}${appointmentData.zoneId ? ` - ${zones.find(z => z.id === appointmentData.zoneId)?.name}` : ''}`,
         userId: user?.id,
         targetUserId: appointmentData.userId,
         metadata: {
           role: appointmentData.role,
-          zoneId: appointmentData.zoneId,
           wardId: appointmentData.wardId,
+          zoneId: appointmentData.zoneId,
         },
         createdAt: serverTimestamp(),
       });
@@ -553,7 +554,7 @@ export default function AdminManagementPage() {
         description: "Admin appointed successfully.",
       });
 
-      setAppointmentData({ userId: '', role: '', zoneId: '', wardId: '' });
+      setAppointmentData({ userId: '', role: '', wardId: '', zoneId: '' });
       setIsAppointDialogOpen(false);
       loadAdminData();
     } catch (error) {
@@ -595,8 +596,8 @@ export default function AdminManagementPage() {
         name: editData.name,
         email: editData.email,
         phone: editData.phone || null,
-        zoneId: editData.zoneId,
-        wardId: editData.wardId || null,
+        wardId: editData.wardId,
+        zoneId: editData.zoneId || null,
         updatedAt: serverTimestamp(),
       };
 
@@ -607,7 +608,7 @@ export default function AdminManagementPage() {
         description: "Admin updated successfully.",
       });
 
-      setEditData({ name: '', email: '', phone: '', zoneId: '', wardId: '' });
+      setEditData({ name: '', email: '', phone: '', wardId: '', zoneId: '' });
       setSelectedAdmin(null);
       setIsEditDialogOpen(false);
       loadAdminData();
@@ -748,8 +749,8 @@ export default function AdminManagementPage() {
       name: admin.name,
       email: admin.email,
       phone: admin.phone || '',
-      zoneId: admin.zoneId || '',
       wardId: admin.wardId || '',
+      zoneId: admin.zoneId || '',
     });
     setIsEditDialogOpen(true);
   };
@@ -764,9 +765,9 @@ export default function AdminManagementPage() {
       return;
     }
 
-    // Pre-select zone for zonal admin
-    const initialZoneId = isZonalAdmin ? user?.zoneId || '' : '';
-    setAppointmentData({ userId: '', role: '', zoneId: initialZoneId, wardId: '' });
+    // Pre-select ward for ward admin
+    const initialWardId = isWardAdmin ? user?.wardId || '' : '';
+    setAppointmentData({ userId: '', role: '', wardId: initialWardId, zoneId: '' });
     setIsAppointDialogOpen(true);
   };
 
@@ -811,13 +812,13 @@ export default function AdminManagementPage() {
     }
   };
 
-  const accessibleZones = getAccessibleZones();
   const accessibleWards = getAccessibleWards();
-  const availableWards = appointmentData.zoneId
-    ? wards.filter(ward => ward.zoneId === appointmentData.zoneId)
+  const accessibleZones = getAccessibleZones();
+  const availableZones = appointmentData.wardId
+    ? zones.filter(zone => zone.wardId === appointmentData.wardId)
     : [];
-  const editAvailableWards = editData.zoneId
-    ? wards.filter(ward => ward.zoneId === editData.zoneId)
+  const editAvailableZones = editData.wardId
+    ? zones.filter(zone => zone.wardId === editData.wardId)
     : [];
 
   if (loading) {
@@ -844,7 +845,7 @@ export default function AdminManagementPage() {
     totalAdmins: admins.length,
     zonalAdmins: admins.filter(a => a.role === 'zonalAdmin').length,
     wardAdmins: admins.filter(a => a.role === 'wardAdmin').length,
-    pendingAppointments: appointments.filter(a => a.status === 'pending' || a.status === 'sent').length,
+    activeAdmins: admins.filter(a => a.status === 'active').length,
   };
 
   // Role-based title and description
@@ -852,26 +853,26 @@ export default function AdminManagementPage() {
     if (isSuperAdmin) {
       return 'Admin Management - System Wide';
     }
-    if (isZonalAdmin) {
-      const zoneName = zones.find(z => z.id === user?.zoneId)?.name || 'Zone';
-      return `Admin Management - ${zoneName}`;
-    }
     if (isWardAdmin) {
       const wardName = wards.find(w => w.id === user?.wardId)?.name || 'Ward';
       return `Admin Management - ${wardName}`;
+    }
+    if (isZonalAdmin) {
+      const zoneName = zones.find(z => z.id === user?.zoneId)?.name || 'Zone';
+      return `Admin Management - ${zoneName}`;
     }
     return 'Admin Management';
   };
 
   const getRoleBasedDescription = () => {
     if (isSuperAdmin) {
-      return 'Appoint and manage zonal and ward administrators across the entire system';
-    }
-    if (isZonalAdmin) {
-      return 'Appoint and manage ward administrators within your zone';
+      return 'Appoint and manage ward and zonal administrators across the entire system';
     }
     if (isWardAdmin) {
-      return 'View administrators in your ward';
+      return 'Appoint and manage zonal administrators within zones under your ward';
+    }
+    if (isZonalAdmin) {
+      return 'View your zone information and administrative details';
     }
     return 'Manage administrators';
   };
@@ -884,10 +885,10 @@ export default function AdminManagementPage() {
           <Alert className="border-blue-200 bg-blue-50">
             <Shield className="h-4 w-4 text-blue-600" />
             <AlertDescription className="text-blue-800">
-              You have {isZonalAdmin ? 'zonal' : 'ward'} admin access. 
-              {isZonalAdmin 
-                ? ' You can appoint and manage ward administrators within your zone.'
-                : ' You can view administrators in your ward but cannot make changes.'}
+              You have {isWardAdmin ? 'ward' : 'zonal'} admin access. 
+              {isWardAdmin 
+                ? ' You can appoint and manage zonal administrators within zones under your ward.'
+                : ' You can view your zone information but cannot make administrative changes.'}
             </AlertDescription>
           </Alert>
         )}
@@ -931,14 +932,14 @@ export default function AdminManagementPage() {
               value: stats.totalAdmins,
               icon: Shield,
               color: 'blue',
-              description: 'Active administrators',
+              description: isZonalAdmin ? 'In your zone' : 'Active administrators',
             },
             {
               title: 'Zonal Admins',
               value: stats.zonalAdmins,
               icon: MapPin,
               color: 'purple',
-              description: 'Zone administrators',
+              description: isWardAdmin ? 'In your ward zones' : 'Zone administrators',
             },
             {
               title: 'Ward Admins',
@@ -948,11 +949,11 @@ export default function AdminManagementPage() {
               description: 'Ward administrators',
             },
             {
-              title: 'Pending Appointments',
-              value: stats.pendingAppointments,
-              icon: Clock,
-              color: 'yellow',
-              description: 'Awaiting acceptance',
+              title: 'Active Status',
+              value: stats.activeAdmins,
+              icon: CheckCircle,
+              color: 'emerald',
+              description: 'Currently active',
             },
           ].map((stat, index) => (
             <motion.div
@@ -994,7 +995,7 @@ export default function AdminManagementPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                 <div className="relative">
                   <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
                   <Input
@@ -1005,6 +1006,23 @@ export default function AdminManagementPage() {
                   />
                 </div>
                 
+                {/* Ward filter - only show if user has access to multiple wards */}
+                {accessibleWards.length > 1 && (
+                  <Select value={selectedWard} onValueChange={setSelectedWard}>
+                    <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
+                      <SelectValue placeholder="All Wards" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Wards</SelectItem>
+                      {accessibleWards.map((ward) => (
+                        <SelectItem key={ward.id} value={ward.id}>
+                          {ward.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
                 {/* Zone filter - only show if user has access to multiple zones */}
                 {accessibleZones.length > 1 && (
                   <Select value={selectedZone} onValueChange={setSelectedZone}>
@@ -1029,8 +1047,8 @@ export default function AdminManagementPage() {
                   <SelectContent>
                     <SelectItem value="all">All Roles</SelectItem>
                     {isSuperAdmin && <SelectItem value="superAdmin">Super Admins</SelectItem>}
-                    {(isSuperAdmin || isZonalAdmin) && <SelectItem value="zonalAdmin">Zonal Admins</SelectItem>}
-                    <SelectItem value="wardAdmin">Ward Admins</SelectItem>
+                    <SelectItem value="zonalAdmin">Zonal Admins</SelectItem>
+                    {(isSuperAdmin || isWardAdmin) && <SelectItem value="wardAdmin">Ward Admins</SelectItem>}
                   </SelectContent>
                 </Select>
 
@@ -1063,11 +1081,13 @@ export default function AdminManagementPage() {
                   <Shield className="mx-auto h-12 w-12 text-gray-400 mb-4" />
                   <h3 className="text-lg font-medium text-gray-900 mb-2">No administrators found</h3>
                   <p className="text-gray-500 mb-4">
-                    {searchTerm || selectedZone !== 'all' || selectedRole !== 'all' || selectedStatus !== 'all'
+                    {isZonalAdmin 
+                      ? 'You are viewing your zone administrative details.'
+                      : searchTerm || selectedWard !== 'all' || selectedZone !== 'all' || selectedRole !== 'all' || selectedStatus !== 'all'
                       ? 'Try adjusting your search filters.'
                       : 'No administrators have been appointed yet.'}
                   </p>
-                  {(canManageZonalAdmins || canManageWardAdmins) && !searchTerm && selectedZone === 'all' && selectedRole === 'all' && selectedStatus === 'all' && (
+                  {(canManageZonalAdmins || canManageWardAdmins) && !searchTerm && selectedWard === 'all' && selectedZone === 'all' && selectedRole === 'all' && selectedStatus === 'all' && (
                     <Button onClick={openAppointDialog} className="bg-blue-600 hover:bg-blue-700">
                       <Plus className="w-4 h-4 mr-2" />
                       Appoint Admin
@@ -1099,7 +1119,12 @@ export default function AdminManagementPage() {
                                 </AvatarFallback>
                               </Avatar>
                               <div>
-                                <div className="font-medium text-gray-900">{admin.name}</div>
+                                <div className="font-medium text-gray-900 flex items-center gap-2">
+                                  {admin.name}
+                                  {admin.id === user?.id && (
+                                    <Badge variant="outline" className="text-xs">You</Badge>
+                                  )}
+                                </div>
                                 <div className="text-sm text-gray-500 flex items-center gap-1">
                                   <Mail className="w-3 h-3" />
                                   {admin.email}
@@ -1137,16 +1162,16 @@ export default function AdminManagementPage() {
                           </TableCell>
                           <TableCell>
                             <div className="space-y-1">
-                              {admin.zoneName && (
-                                <div className="flex items-center text-sm text-gray-700">
-                                  <MapPin className="w-3 h-3 mr-1 text-gray-400" />
-                                  {admin.zoneName}
-                                </div>
-                              )}
                               {admin.wardName && (
-                                <div className="flex items-center text-sm text-gray-500">
+                                <div className="flex items-center text-sm text-gray-700">
                                   <Building2 className="w-3 h-3 mr-1 text-gray-400" />
                                   {admin.wardName}
+                                </div>
+                              )}
+                              {admin.zoneName && (
+                                <div className="flex items-center text-sm text-gray-500">
+                                  <MapPin className="w-3 h-3 mr-1 text-gray-400" />
+                                  {admin.zoneName}
                                 </div>
                               )}
                             </div>
@@ -1186,74 +1211,78 @@ export default function AdminManagementPage() {
                                 <DropdownMenuLabel>Actions</DropdownMenuLabel>
                                 <DropdownMenuSeparator />
                                 
-                                {canPerformAction(admin, 'view') && (
-                                  <Dialog>
-                                    <DialogTrigger asChild>
-                                      <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                                        <Eye className="mr-2 h-4 w-4" />
-                                        View Details
-                                      </DropdownMenuItem>
-                                    </DialogTrigger>
-                                    <DialogContent className="max-w-2xl">
-                                      <DialogHeader>
-                                        <DialogTitle className="flex items-center gap-2">
-                                          <Shield className="h-5 w-5 text-blue-600" />
-                                          Administrator Details - {admin.name}
-                                        </DialogTitle>
-                                        <DialogDescription>
-                                          Complete information for this administrator
-                                        </DialogDescription>
-                                      </DialogHeader>
-                                      <div className="grid grid-cols-2 gap-6 py-4">
-                                        <div className="space-y-4">
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Full Name</label>
-                                            <p className="text-gray-900">{admin.name}</p>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Email</label>
-                                            <p className="text-gray-900">{admin.email}</p>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Phone</label>
-                                            <p className="text-gray-900">{admin.phone || 'Not provided'}</p>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Role</label>
-                                            <Badge className={getRoleBadgeColor(admin.role)}>
-                                              {admin.role}
-                                            </Badge>
-                                          </div>
+                                {/* View Details - Always available */}
+                                <Dialog>
+                                  <DialogTrigger asChild>
+                                    <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
+                                      <Eye className="mr-2 h-4 w-4" />
+                                      View Details
+                                    </DropdownMenuItem>
+                                  </DialogTrigger>
+                                  <DialogContent className="max-w-2xl">
+                                    <DialogHeader>
+                                      <DialogTitle className="flex items-center gap-2">
+                                        <Shield className="h-5 w-5 text-blue-600" />
+                                        Administrator Details - {admin.name}
+                                      </DialogTitle>
+                                      <DialogDescription>
+                                        Complete information for this administrator
+                                      </DialogDescription>
+                                    </DialogHeader>
+                                    <div className="grid grid-cols-2 gap-6 py-4">
+                                      <div className="space-y-4">
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Full Name</label>
+                                          <p className="text-gray-900">{admin.name}</p>
                                         </div>
-                                        <div className="space-y-4">
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Zone</label>
-                                            <p className="text-gray-900">{admin.zoneName || 'Not assigned'}</p>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Ward</label>
-                                            <p className="text-gray-900">{admin.wardName || 'Not assigned'}</p>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Status</label>
-                                            <div>{getStatusBadge(admin.status)}</div>
-                                          </div>
-                                          <div>
-                                            <label className="text-sm font-medium text-gray-600">Appointed Date</label>
-                                            <p className="text-gray-900">
-                                              {admin.appointedAt?.toLocaleDateString() || 'Unknown'}
-                                            </p>
-                                          </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Email</label>
+                                          <p className="text-gray-900">{admin.email}</p>
+                                        </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Phone</label>
+                                          <p className="text-gray-900">{admin.phone || 'Not provided'}</p>
+                                        </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Role</label>
+                                          <Badge className={getRoleBadgeColor(admin.role)}>
+                                            {admin.role}
+                                          </Badge>
                                         </div>
                                       </div>
-                                    </DialogContent>
-                                  </Dialog>
-                                )}
+                                      <div className="space-y-4">
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Ward</label>
+                                          <p className="text-gray-900">{admin.wardName || 'Not assigned'}</p>
+                                        </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Zone</label>
+                                          <p className="text-gray-900">{admin.zoneName || 'Not assigned'}</p>
+                                        </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Status</label>
+                                          <div>{getStatusBadge(admin.status)}</div>
+                                        </div>
+                                        <div>
+                                          <label className="text-sm font-medium text-gray-600">Appointed Date</label>
+                                          <p className="text-gray-900">
+                                            {admin.appointedAt?.toLocaleDateString() || 'Unknown'}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </DialogContent>
+                                </Dialog>
                                 
-                                {canPerformAction(admin, 'edit') && (
+                                {canPerformAction(admin, 'edit') ? (
                                   <DropdownMenuItem onClick={() => openEditDialog(admin)}>
                                     <Edit className="mr-2 h-4 w-4" />
                                     Edit Details
+                                  </DropdownMenuItem>
+                                ) : (
+                                  <DropdownMenuItem disabled>
+                                    <Lock className="mr-2 h-4 w-4" />
+                                    Edit Details (No Permission)
                                   </DropdownMenuItem>
                                 )}
 
@@ -1308,13 +1337,6 @@ export default function AdminManagementPage() {
                                     </AlertDialog>
                                   </>
                                 )}
-
-                                {!canPerformAction(admin, 'view') && (
-                                  <DropdownMenuItem disabled>
-                                    <AlertTriangle className="mr-2 h-4 w-4" />
-                                    No permissions
-                                  </DropdownMenuItem>
-                                )}
                               </DropdownMenuContent>
                             </DropdownMenu>
                           </TableCell>
@@ -1337,7 +1359,7 @@ export default function AdminManagementPage() {
                 Appoint New Administrator
               </DialogTitle>
               <DialogDescription>
-                Select a verified user and assign them administrative privileges for a specific zone and ward.
+                Select a verified user and assign them administrative privileges for a specific ward and zone.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-6 py-4">
@@ -1368,18 +1390,18 @@ export default function AdminManagementPage() {
                 <Label htmlFor="adminRole">Admin Role</Label>
                 <Select 
                   value={appointmentData.role} 
-                  onValueChange={(role) => setAppointmentData(prev => ({ ...prev, role: role as 'zonalAdmin' | 'wardAdmin', wardId: '' }))}
+                  onValueChange={(role) => setAppointmentData(prev => ({ ...prev, role: role as 'zonalAdmin' | 'wardAdmin', zoneId: '' }))}
                   disabled={submitting}
                 >
                   <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
                     <SelectValue placeholder="Select admin role" />
                   </SelectTrigger>
                   <SelectContent>
-                    {canManageZonalAdmins && (
-                      <SelectItem value="zonalAdmin">Zonal Administrator</SelectItem>
-                    )}
                     {canManageWardAdmins && (
                       <SelectItem value="wardAdmin">Ward Administrator</SelectItem>
+                    )}
+                    {canManageZonalAdmins && (
+                      <SelectItem value="zonalAdmin">Zonal Administrator</SelectItem>
                     )}
                   </SelectContent>
                 </Select>
@@ -1387,49 +1409,49 @@ export default function AdminManagementPage() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="assignZone">Assign to Zone</Label>
+                  <Label htmlFor="assignWard">Assign to Ward</Label>
                   <Select 
-                    value={appointmentData.zoneId} 
-                    onValueChange={(zoneId) => setAppointmentData(prev => ({ ...prev, zoneId, wardId: '' }))}
-                    disabled={submitting || (isZonalAdmin && accessibleZones.length === 1)}
+                    value={appointmentData.wardId} 
+                    onValueChange={(wardId) => setAppointmentData(prev => ({ ...prev, wardId, zoneId: '' }))}
+                    disabled={submitting || (isWardAdmin && accessibleWards.length === 1)}
                   >
                     <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                      <SelectValue placeholder="Select zone" />
+                      <SelectValue placeholder="Select ward" />
                     </SelectTrigger>
                     <SelectContent>
-                      {accessibleZones.map((zone) => (
-                        <SelectItem key={zone.id} value={zone.id}>
-                          {zone.name}
+                      {accessibleWards.map((ward) => (
+                        <SelectItem key={ward.id} value={ward.id}>
+                          {ward.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  {isZonalAdmin && (
+                  {isWardAdmin && (
                     <p className="text-xs text-gray-500">
-                      You can only appoint admins in your assigned zone.
+                      You can only appoint admins in your assigned ward.
                     </p>
                   )}
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="assignWard">Assign to Ward</Label>
+                  <Label htmlFor="assignZone">Assign to Zone</Label>
                   <Select
-                    value={appointmentData.wardId}
-                    onValueChange={(wardId) => setAppointmentData(prev => ({ ...prev, wardId }))}
-                    disabled={submitting || !(appointmentData.role === 'wardAdmin' && appointmentData.zoneId)}
+                    value={appointmentData.zoneId}
+                    onValueChange={(zoneId) => setAppointmentData(prev => ({ ...prev, zoneId }))}
+                    disabled={submitting || !(appointmentData.role === 'zonalAdmin' && appointmentData.wardId)}
                   >
                     <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
                       <SelectValue placeholder={
-                        appointmentData.role !== 'wardAdmin' 
-                          ? 'Select admin role first' 
-                          : (!appointmentData.zoneId ? 'Select zone first' : 'Select ward')
+                        appointmentData.role !== 'zonalAdmin' 
+                          ? 'Select zonal admin role first' 
+                          : (!appointmentData.wardId ? 'Select ward first' : 'Select zone')
                       } />
                     </SelectTrigger>
                     <SelectContent>
-                      {appointmentData.role === 'wardAdmin' && appointmentData.zoneId
-                        ? availableWards.map((ward) => (
-                            <SelectItem key={ward.id} value={ward.id}>
-                              {ward.name}
+                      {appointmentData.role === 'zonalAdmin' && appointmentData.wardId
+                        ? availableZones.map((zone) => (
+                            <SelectItem key={zone.id} value={zone.id}>
+                              {zone.name}
                             </SelectItem>
                           ))
                         : null}
@@ -1465,8 +1487,8 @@ export default function AdminManagementPage() {
                   submitting ||
                   !appointmentData.userId ||
                   !appointmentData.role ||
-                  !appointmentData.zoneId ||
-                  (appointmentData.role === 'wardAdmin' && !appointmentData.wardId)
+                  !appointmentData.wardId ||
+                  (appointmentData.role === 'zonalAdmin' && !appointmentData.zoneId)
                 }
                 className="bg-blue-600 hover:bg-blue-700"
               >
@@ -1536,40 +1558,40 @@ export default function AdminManagementPage() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="editZone">Zone Assignment</Label>
+                  <Label htmlFor="editWard">Ward Assignment</Label>
                   <Select 
-                    value={editData.zoneId} 
-                    onValueChange={(value) => setEditData(prev => ({ ...prev, zoneId: value, wardId: '' }))}
-                    disabled={submitting || (isZonalAdmin && accessibleZones.length === 1)}
+                    value={editData.wardId} 
+                    onValueChange={(value) => setEditData(prev => ({ ...prev, wardId: value, zoneId: '' }))}
+                    disabled={submitting || (isWardAdmin && accessibleWards.length === 1)}
                   >
                     <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                      <SelectValue placeholder="Select zone" />
+                      <SelectValue placeholder="Select ward" />
                     </SelectTrigger>
                     <SelectContent>
-                      {accessibleZones.map((zone) => (
-                        <SelectItem key={zone.id} value={zone.id}>
-                          {zone.name}
+                      {accessibleWards.map((ward) => (
+                        <SelectItem key={ward.id} value={ward.id}>
+                          {ward.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
 
-                {selectedAdmin?.role === 'wardAdmin' && (
+                {selectedAdmin?.role === 'zonalAdmin' && (
                   <div className="space-y-2">
-                    <Label htmlFor="editWard">Ward Assignment</Label>
+                    <Label htmlFor="editZone">Zone Assignment</Label>
                     <Select 
-                      value={editData.wardId} 
-                      onValueChange={(value) => setEditData(prev => ({ ...prev, wardId: value }))}
-                      disabled={submitting || !editData.zoneId}
+                      value={editData.zoneId} 
+                      onValueChange={(value) => setEditData(prev => ({ ...prev, zoneId: value }))}
+                      disabled={submitting || !editData.wardId}
                     >
                       <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                        <SelectValue placeholder="Select ward" />
+                        <SelectValue placeholder="Select zone" />
                       </SelectTrigger>
                       <SelectContent>
-                        {editAvailableWards.map((ward) => (
-                          <SelectItem key={ward.id} value={ward.id}>
-                            {ward.name}
+                        {editAvailableZones.map((zone) => (
+                          <SelectItem key={zone.id} value={zone.id}>
+                            {zone.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -1588,7 +1610,7 @@ export default function AdminManagementPage() {
               </Button>
               <Button 
                 onClick={handleEditAdmin}
-                disabled={submitting || !editData.name || !editData.email || !editData.zoneId}
+                disabled={submitting || !editData.name || !editData.email || !editData.wardId}
                 className="bg-blue-600 hover:bg-blue-700"
               >
                 {submitting ? (

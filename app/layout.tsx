@@ -7,7 +7,7 @@ import { Toaster } from '@/components/ui/sonner';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Political Party Registration System',
+  title: 'hon.akeem amosun political movement System',
   description: 'A comprehensive system for managing political party member registration and administration',
 };
 

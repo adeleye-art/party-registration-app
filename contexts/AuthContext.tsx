@@ -103,6 +103,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
       phone: userData.phone,
       address: userData.address,
       idNumber: userData.idNumber,
+      qualification: userData.qualification,
+      occupation: userData.occupation,
+      idType: userData.idType,
+      dob : userData.dob,
+      // profilePicture: userData.profilePicture,
+      localGovt: userData.localGovt
     };
 
     await setDoc(doc(db, 'users', firebaseUser.uid), newUser);

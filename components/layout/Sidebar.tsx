@@ -27,8 +27,8 @@ interface NavigationItem {
 const navigation: NavigationItem[] = [
   { name: 'Dashboard', href: '/dashboard', icon: Home, roles: ['superAdmin', 'zonalAdmin', 'wardAdmin'] },
   { name: 'Users', href: '/dashboard/users', icon: Users, roles: ['superAdmin', 'zonalAdmin', 'wardAdmin'] },
-  { name: 'Zones', href: '/dashboard/zones', icon: MapPin, roles: ['superAdmin'] },
-  { name: 'Wards', href: '/dashboard/wards', icon: Building2, roles: ['superAdmin', 'zonalAdmin'] },
+  { name: 'Zones', href: '/dashboard/zones', icon: MapPin, roles: ['superAdmin', 'zonalAdmin', 'wardAdmin'] },
+  { name: 'Wards', href: '/dashboard/wards', icon: Building2, roles: ['superAdmin', 'WardAdmin'] },
   { name: 'Pending Approvals', href: '/dashboard/approvals', icon: UserCheck, roles: ['superAdmin', 'zonalAdmin', 'wardAdmin'] },
   { name: 'Bulk Upload', href: '/dashboard/upload', icon: Upload, roles: ['wardAdmin'] },
   { name: 'Reports', href: '/dashboard/reports', icon: FileText, roles: ['superAdmin', 'zonalAdmin'] },
@@ -56,7 +56,7 @@ export function Sidebar() {
             <Shield className="h-6 w-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-gray-900">PartyAdmin</h1>
+            <h1 className="text-xl font-bold text-gray-900">Logo</h1>
             <p className="text-xs text-gray-500 capitalize">{user?.role}</p>
           </div>
         </motion.div>

@@ -92,21 +92,23 @@ import {
   addDoc,
   serverTimestamp,
   Timestamp,
-  deleteDoc
+  deleteDoc,
+  getDocs
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { toast } from '@/hooks/use-toast';
 
-interface Zone {
-  id: string;
-  name: string;
-  createdAt?: Timestamp;
-}
-
 interface Ward {
   id: string;
   name: string;
-  zoneId: string;
+  description?: string;
+  createdAt?: Timestamp;
+}
+
+interface Zone {
+  id: string;
+  name: string;
+  wardId: string; // Zone belongs to a ward
   createdAt?: Timestamp;
 }
 
@@ -116,6 +118,11 @@ interface UserData {
   phone: string;
   idNumber: string;
   address: string;
+  dob?: string;
+  idType?: string;
+  localGovt?: string;
+  occupation?: string;
+  qualification?: string;
 }
 
 interface PendingUserWithLocation {
@@ -154,32 +161,31 @@ export default function ApprovalsPage() {
   const isSuperAdmin = user?.role === 'superAdmin';
   const isZonalAdmin = user?.role === 'zonalAdmin';
   const isWardAdmin = user?.role === 'wardAdmin';
-  
-  const canManageAllUsers = isSuperAdmin;
-  const canManageZoneUsers = isZonalAdmin || canManageAllUsers;
-  const canManageWardUsers = isWardAdmin || canManageZoneUsers;
 
-  // Get accessible zones based on user role
-  const getAccessibleZones = () => {
-    if (canManageAllUsers) return zones;
-    if (isZonalAdmin && user?.zoneId) {
-      return zones.filter(zone => zone.id === user.zoneId);
-    }
+  // Get accessible wards based on user role
+  const getAccessibleWards = () => {
+    if (isSuperAdmin) return wards;
     if (isWardAdmin && user?.wardId) {
-      const userWard = wards.find(w => w.id === user.wardId);
-      return zones.filter(zone => zone.id === userWard?.zoneId);
+      return wards.filter(ward => ward.id === user.wardId);
+    }
+    if (isZonalAdmin && user?.zoneId) {
+      // Find the ward that contains the user's zone
+      const userZone = zones.find(zone => zone.id === user.zoneId);
+      return wards.filter(ward => ward.id === userZone?.wardId);
     }
     return [];
   };
 
-  // Get accessible wards based on user role
-  const getAccessibleWards = () => {
-    if (canManageAllUsers) return wards;
-    if (isZonalAdmin && user?.zoneId) {
-      return wards.filter(ward => ward.zoneId === user.zoneId);
-    }
+  // Get accessible zones based on user role
+  const getAccessibleZones = () => {
+    if (isSuperAdmin) return zones;
     if (isWardAdmin && user?.wardId) {
-      return wards.filter(ward => ward.id === user.wardId);
+      // Ward admin can see all zones under their ward
+      return zones.filter(zone => zone.wardId === user.wardId);
+    }
+    if (isZonalAdmin && user?.zoneId) {
+      // Zonal admin can only see their assigned zone
+      return zones.filter(zone => zone.id === user.zoneId);
     }
     return [];
   };
@@ -196,17 +202,17 @@ export default function ApprovalsPage() {
       return false;
     }
 
-    // Zonal admin can manage users in their zone (except other admins of equal/higher level)
-    if (isZonalAdmin) {
-      const canManageUser = targetUser.zoneId === user.zoneId;
-      const canManageRole = !['superAdmin', 'zonalAdmin'].includes(targetUser.role) || 
-                           (targetUser.role === 'zonalAdmin' && targetUser.id === user.id && action === 'view');
+    // Ward admin can manage users in zones under their ward
+    if (isWardAdmin && user?.wardId) {
+      const canManageUser = targetUser.wardId === user.wardId;
+      const canManageRole = !['superAdmin', 'zonalAdmin', 'wardAdmin'].includes(targetUser.role) || 
+                           (targetUser.role === 'member');
       return canManageUser && canManageRole;
     }
 
-    // Ward admin can only manage members in their ward
-    if (isWardAdmin) {
-      const canManageUser = targetUser.wardId === user.wardId;
+    // Zonal admin can only manage users in their specific zone
+    if (isZonalAdmin && user?.zoneId) {
+      const canManageUser = targetUser.zoneId === user.zoneId;
       const canManageRole = targetUser.role === 'member';
       return canManageUser && canManageRole;
     }
@@ -214,64 +220,69 @@ export default function ApprovalsPage() {
     return false;
   };
 
-  // Load zones and wards from Firebase with role-based filtering
+  // Load wards and zones from Firebase with role-based filtering
   useEffect(() => {
-    let zonesQuery = query(collection(db, 'zones'), orderBy('name'));
-    let wardsQuery = query(collection(db, 'wards'), orderBy('name'));
+    const loadWardsAndZones = async () => {
+      try {
+        // Load wards based on user role
+        let wardsQuery;
+        if (isSuperAdmin) {
+          wardsQuery = query(collection(db, 'wards'), orderBy('name'));
+        } else if (isWardAdmin && user?.wardId) {
+          wardsQuery = query(collection(db, 'wards'), where('__name__', '==', user.wardId));
+        } else if (isZonalAdmin && user?.zoneId) {
+          // For zonal admin, we need to find their ward through their zone
+          const zonesSnapshot = await getDocs(query(collection(db, 'zones'), where('__name__', '==', user.zoneId)));
+          if (!zonesSnapshot.empty) {
+            const userZone = zonesSnapshot.docs[0].data();
+            wardsQuery = query(collection(db, 'wards'), where('__name__', '==', userZone.wardId));
+          } else {
+            wardsQuery = query(collection(db, 'wards'), orderBy('name'));
+          }
+        } else {
+          wardsQuery = query(collection(db, 'wards'), orderBy('name'));
+        }
 
-    // Apply role-based filtering for zones
-    if (isZonalAdmin && user?.zoneId) {
-      zonesQuery = query(collection(db, 'zones'), where('__name__', '==', user.zoneId));
-    } else if (isWardAdmin && user?.wardId) {
-      // For ward admin, we need to get the zone of their ward
-      const userWard = wards.find(w => w.id === user.wardId);
-      if (userWard) {
-        zonesQuery = query(collection(db, 'zones'), where('__name__', '==', userWard.zoneId));
+        const wardsSnapshot = await getDocs(wardsQuery);
+        const wardsData = wardsSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        })) as Ward[];
+        setWards(wardsData);
+
+        // Load zones based on user role
+        let zonesQuery;
+        if (isSuperAdmin) {
+          zonesQuery = query(collection(db, 'zones'), orderBy('name'));
+        } else if (isWardAdmin && user?.wardId) {
+          zonesQuery = query(collection(db, 'zones'), where('wardId', '==', user.wardId), orderBy('name'));
+        } else if (isZonalAdmin && user?.zoneId) {
+          zonesQuery = query(collection(db, 'zones'), where('__name__', '==', user.zoneId));
+        } else {
+          zonesQuery = query(collection(db, 'zones'), orderBy('name'));
+        }
+
+        const zonesSnapshot = await getDocs(zonesQuery);
+        const zonesData = zonesSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        })) as Zone[];
+        setZones(zonesData);
+
+      } catch (error) {
+        console.error('Error fetching wards and zones:', error);
+        toast({
+          title: "Error",
+          description: "Failed to load wards and zones",
+          variant: "destructive",
+        });
       }
-    }
-
-    // Apply role-based filtering for wards
-    if (isZonalAdmin && user?.zoneId) {
-      wardsQuery = query(collection(db, 'wards'), where('zoneId', '==', user.zoneId), orderBy('name'));
-    } else if (isWardAdmin && user?.wardId) {
-      wardsQuery = query(collection(db, 'wards'), where('__name__', '==', user.wardId));
-    }
-
-    const unsubscribeZones = onSnapshot(zonesQuery, (snapshot) => {
-      const zonesData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Zone[];
-      setZones(zonesData);
-    }, (error) => {
-      console.error('Error fetching zones:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load zones",
-        variant: "destructive",
-      });
-    });
-
-    const unsubscribeWards = onSnapshot(wardsQuery, (snapshot) => {
-      const wardsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Ward[];
-      setWards(wardsData);
-    }, (error) => {
-      console.error('Error fetching wards:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load wards",
-        variant: "destructive",
-      });
-    });
-
-    return () => {
-      unsubscribeZones();
-      unsubscribeWards();
     };
-  }, [user, isZonalAdmin, isWardAdmin]);
+
+    if (user) {
+      loadWardsAndZones();
+    }
+  }, [user, isSuperAdmin, isWardAdmin, isZonalAdmin]);
 
   // Load pending users from Firebase with real-time updates and role-based filtering
   useEffect(() => {
@@ -280,21 +291,30 @@ export default function ApprovalsPage() {
       return;
     }
 
-    let usersQuery = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
+    let usersQuery;
 
-    // Apply role-based filtering
-    if (isZonalAdmin && user?.zoneId) {
-      usersQuery = query(
-        collection(db, 'users'),
-        where('zoneId', '==', user.zoneId),
-        orderBy('createdAt', 'desc')
-      );
+    // Apply role-based filtering for users
+    if (isSuperAdmin) {
+      // Super admin can see all users
+      usersQuery = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
     } else if (isWardAdmin && user?.wardId) {
+      // Ward admin can see users in zones under their ward
       usersQuery = query(
         collection(db, 'users'),
         where('wardId', '==', user.wardId),
         orderBy('createdAt', 'desc')
       );
+    } else if (isZonalAdmin && user?.zoneId) {
+      // Zonal admin can only see users in their specific zone
+      usersQuery = query(
+        collection(db, 'users'),
+        where('zoneId', '==', user.zoneId),
+        orderBy('createdAt', 'desc')
+      );
+    } else {
+      // Fallback - no access
+      setLoading(false);
+      return;
     }
 
     console.log('Setting up users query for role:', user.role);
@@ -310,6 +330,11 @@ export default function ApprovalsPage() {
             phone: data.phone || '',
             idNumber: data.idNumber || '',
             address: data.address || '',
+            dob: data.dob || '',
+            idType: data.idType || '',
+            localGovt: data.localGovt || '',
+            occupation: data.occupation || '',
+            qualification: data.qualification || '',
           },
           zoneId: data.zoneId || '',
           wardId: data.wardId || '',
@@ -346,7 +371,7 @@ export default function ApprovalsPage() {
     });
 
     return () => unsubscribe();
-  }, [user, zones, wards, isZonalAdmin, isWardAdmin]);
+  }, [user, zones, wards, isSuperAdmin, isWardAdmin, isZonalAdmin]);
 
   // Filter users based on search and filters
   useEffect(() => {
@@ -375,7 +400,7 @@ export default function ApprovalsPage() {
     // Status filter
     if (selectedStatus !== 'all') {
       if (selectedStatus === 'approved') filtered = filtered.filter(user => user.verified === true);
-      if (selectedStatus === 'pending') filtered = filtered.filter(user => user.verified === false);
+      if (selectedStatus === 'pending') filtered = filtered.filter(user => user.verified === false && !user.rejectionReason);
       if (selectedStatus === 'rejected') filtered = filtered.filter(user => user.verified === false && user.rejectionReason);
     }
 
@@ -571,8 +596,8 @@ export default function ApprovalsPage() {
       Phone: user.userData.phone,
       'ID Number': user.userData.idNumber,
       Role: user.role,
-      Zone: user.zoneName,
       Ward: user.wardName,
+      Zone: user.zoneName,
       Status: user.verified ? 'Approved' : (user.rejectionReason ? 'Rejected' : 'Pending'),
       'Application Date': user.createdAt?.toLocaleDateString(),
       Address: user.userData.address,
@@ -633,12 +658,15 @@ export default function ApprovalsPage() {
 
   const accessibleZones = getAccessibleZones();
   const accessibleWards = getAccessibleWards();
-  const availableWards = selectedZone === 'all' 
-    ? accessibleWards 
-    : accessibleWards.filter(ward => ward.zoneId === selectedZone);
+  
+  // Filter zones based on selected ward
+  const availableZones = selectedWard === 'all' 
+    ? accessibleZones 
+    : accessibleZones.filter(zone => zone.wardId === selectedWard);
 
-  const reassignmentAvailableWards = reassignmentData.zoneId
-    ? wards.filter(ward => ward.zoneId === reassignmentData.zoneId)
+  // For reassignment, filter zones based on selected ward
+  const reassignmentAvailableZones = reassignmentData.wardId
+    ? zones.filter(zone => zone.wardId === reassignmentData.wardId)
     : [];
 
   if (loading) {
@@ -677,10 +705,10 @@ export default function ApprovalsPage() {
     switch (user?.role) {
       case 'superAdmin':
         return 'User Approvals - All Requests';
-      case 'zonalAdmin':
-        return `User Approvals - ${zones.find(z => z.id === user.zoneId)?.name || 'Zone'} Requests`;
       case 'wardAdmin':
         return `User Approvals - ${wards.find(w => w.id === user.wardId)?.name || 'Ward'} Requests`;
+      case 'zonalAdmin':
+        return `User Approvals - ${zones.find(z => z.id === user.zoneId)?.name || 'Zone'} Requests`;
       default:
         return 'User Approvals';
     }
@@ -689,11 +717,11 @@ export default function ApprovalsPage() {
   const getRoleBasedDescription = () => {
     switch (user?.role) {
       case 'superAdmin':
-        return 'Review and manage user registration requests across all zones and wards';
+        return 'Review and manage user registration requests across all wards and zones';
+      case 'wardAdmin':
+        return 'Review and manage user registration requests within zones under your ward';
       case 'zonalAdmin':
         return 'Review and manage user registration requests within your zone';
-      case 'wardAdmin':
-        return 'Review and manage user registration requests within your ward';
       default:
         return 'Review and manage user registration requests';
     }
@@ -707,8 +735,8 @@ export default function ApprovalsPage() {
           <Alert className="border-blue-200 bg-blue-50">
             <Shield className="h-4 w-4 text-blue-600" />
             <AlertDescription className="text-blue-800">
-              You have {user?.role === 'zonalAdmin' ? 'zonal' : 'ward'} admin access. 
-              You can only manage user approvals within your assigned {user?.role === 'zonalAdmin' ? 'zone' : 'ward'}.
+              You have {user?.role === 'wardAdmin' ? 'ward' : 'zonal'} admin access. 
+              You can only manage user approvals within your assigned {user?.role === 'wardAdmin' ? 'ward and its zones' : 'zone'}.
             </AlertDescription>
           </Alert>
         )}
@@ -812,23 +840,6 @@ export default function ApprovalsPage() {
                   </div>
                 </div>
                 
-                {/* Zone filter - only show if user has access to multiple zones */}
-                {accessibleZones.length > 1 && (
-                  <Select value={selectedZone} onValueChange={setSelectedZone}>
-                    <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                      <SelectValue placeholder="All Zones" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Zones</SelectItem>
-                      {accessibleZones.map((zone) => (
-                        <SelectItem key={zone.id} value={zone.id}>
-                          {zone.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-
                 {/* Ward filter - only show if user has access to multiple wards */}
                 {accessibleWards.length > 1 && (
                   <Select value={selectedWard} onValueChange={setSelectedWard}>
@@ -837,9 +848,26 @@ export default function ApprovalsPage() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All Wards</SelectItem>
-                      {availableWards.map((ward) => (
+                      {accessibleWards.map((ward) => (
                         <SelectItem key={ward.id} value={ward.id}>
                           {ward.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {/* Zone filter - only show if user has access to multiple zones */}
+                {accessibleZones.length > 1 && (
+                  <Select value={selectedZone} onValueChange={setSelectedZone}>
+                    <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
+                      <SelectValue placeholder="All Zones" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Zones</SelectItem>
+                      {availableZones.map((zone) => (
+                        <SelectItem key={zone.id} value={zone.id}>
+                          {zone.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -932,16 +960,16 @@ export default function ApprovalsPage() {
                           </TableCell>
                           <TableCell>
                             <div className="space-y-1">
-                              {pendingUser.zoneName && (
-                                <div className="flex items-center text-sm text-gray-700">
-                                  <MapPin className="w-3 h-3 mr-1 text-gray-400" />
-                                  {pendingUser.zoneName}
-                                </div>
-                              )}
                               {pendingUser.wardName && (
-                                <div className="flex items-center text-sm text-gray-500">
+                                <div className="flex items-center text-sm text-gray-700">
                                   <Building2 className="w-3 h-3 mr-1 text-gray-400" />
                                   {pendingUser.wardName}
+                                </div>
+                              )}
+                              {pendingUser.zoneName && (
+                                <div className="flex items-center text-sm text-gray-500">
+                                  <MapPin className="w-3 h-3 mr-1 text-gray-400" />
+                                  {pendingUser.zoneName}
                                 </div>
                               )}
                             </div>
@@ -1009,6 +1037,10 @@ export default function ApprovalsPage() {
                                             <label className="text-sm font-medium text-gray-600">ID Number</label>
                                             <p className="text-gray-900">{pendingUser.userData?.idNumber}</p>
                                           </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Date of Birth</label>
+                                            <p className="text-gray-900">{pendingUser.userData?.dob || 'Not provided'}</p>
+                                          </div>
                                         </div>
                                         <div className="space-y-4">
                                           <div>
@@ -1016,12 +1048,16 @@ export default function ApprovalsPage() {
                                             <p className="text-gray-900">{pendingUser.userData?.address}</p>
                                           </div>
                                           <div>
-                                            <label className="text-sm font-medium text-gray-600">Requested Zone</label>
+                                            <label className="text-sm font-medium text-gray-600">Ward</label>
+                                            <p className="text-gray-900">{pendingUser.wardName}</p>
+                                          </div>
+                                          <div>
+                                            <label className="text-sm font-medium text-gray-600">Zone</label>
                                             <p className="text-gray-900">{pendingUser.zoneName}</p>
                                           </div>
                                           <div>
-                                            <label className="text-sm font-medium text-gray-600">Requested Ward</label>
-                                            <p className="text-gray-900">{pendingUser.wardName}</p>
+                                            <label className="text-sm font-medium text-gray-600">Occupation</label>
+                                            <p className="text-gray-900">{pendingUser.userData?.occupation || 'Not provided'}</p>
                                           </div>
                                           <div>
                                             <label className="text-sm font-medium text-gray-600">Application Date</label>
@@ -1036,7 +1072,7 @@ export default function ApprovalsPage() {
                                 )}
 
                                 {/* Quick Approve */}
-                                {canPerformAction(pendingUser, 'approve') && !pendingUser.verified && (
+                                {canPerformAction(pendingUser, 'approve') && !pendingUser.verified && !pendingUser.rejectionReason && (
                                   <DropdownMenuItem 
                                     onClick={() => handleApproveUser(pendingUser.id)}
                                     className="text-green-600"
@@ -1047,7 +1083,7 @@ export default function ApprovalsPage() {
                                 )}
 
                                 {/* Reject with Reason */}
-                                {canPerformAction(pendingUser, 'reject') && !pendingUser.verified && (
+                                {canPerformAction(pendingUser, 'reject') && !pendingUser.verified && !pendingUser.rejectionReason && (
                                   <Dialog>
                                     <DialogTrigger asChild>
                                       <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
@@ -1097,7 +1133,7 @@ export default function ApprovalsPage() {
                                   </Dialog>
                                 )}
 
-                                {/* Reassign Zone/Ward */}
+                                {/* Reassign Location */}
                                 {canPerformAction(pendingUser, 'reassign') && (
                                   <Dialog>
                                     <DialogTrigger asChild>
@@ -1113,38 +1149,38 @@ export default function ApprovalsPage() {
                                           Reassign Location
                                         </DialogTitle>
                                         <DialogDescription>
-                                          Please select a new zone and ward for {pendingUser.userData?.name}.
+                                          Please select a new ward and zone for {pendingUser.userData?.name}.
                                         </DialogDescription>
                                       </DialogHeader>
                                       <div className="space-y-4 py-4">
                                         <div className="space-y-2">
-                                          <Label htmlFor="zoneId">Select Zone</Label>
-                                          <Select onValueChange={(zoneId) => setReassignmentData({ ...reassignmentData, zoneId })}>
+                                          <Label htmlFor="wardId">Select Ward</Label>
+                                          <Select onValueChange={(wardId) => setReassignmentData({ ...reassignmentData, wardId, zoneId: '' })}>
                                             <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                                              <SelectValue placeholder="Select Zone" />
+                                              <SelectValue placeholder="Select Ward" />
                                             </SelectTrigger>
                                             <SelectContent>
-                                              {accessibleZones.map((zone) => (
-                                                <SelectItem key={zone.id} value={zone.id}>
-                                                  {zone.name}
+                                              {accessibleWards.map((ward) => (
+                                                <SelectItem key={ward.id} value={ward.id}>
+                                                  {ward.name}
                                                 </SelectItem>
                                               ))}
                                             </SelectContent>
                                           </Select>
                                         </div>
                                         <div className="space-y-2">
-                                          <Label htmlFor="wardId">Select Ward</Label>
+                                          <Label htmlFor="zoneId">Select Zone</Label>
                                           <Select 
-                                            onValueChange={(wardId) => setReassignmentData({ ...reassignmentData, wardId })}
-                                            disabled={!reassignmentData.zoneId}
+                                            onValueChange={(zoneId) => setReassignmentData({ ...reassignmentData, zoneId })}
+                                            disabled={!reassignmentData.wardId}
                                           >
                                             <SelectTrigger className="border-gray-200 focus:border-blue-500 focus:ring-blue-500">
-                                              <SelectValue placeholder="Select Ward" />
+                                              <SelectValue placeholder="Select Zone" />
                                             </SelectTrigger>
                                             <SelectContent>
-                                              {reassignmentAvailableWards.map((ward) => (
-                                                <SelectItem key={ward.id} value={ward.id}>
-                                                  {ward.name}
+                                              {reassignmentAvailableZones.map((zone) => (
+                                                <SelectItem key={zone.id} value={zone.id}>
+                                                  {zone.name}
                                                 </SelectItem>
                                               ))}
                                             </SelectContent>

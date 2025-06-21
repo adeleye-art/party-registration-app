@@ -11,11 +11,19 @@ export interface User {
   phone?: string;
   address?: string;
   idNumber?: string;
+  idType?: string;
+  occupation?: string;
+  qualification?: string;
+  dob?: string;
+  profilePicture?: string;
+  localGovt?: string;
+
 }
 
 export interface Zone {
   id: string;
   name: string;
+  wardId?: string;
   description?: string;
   adminId?: string;
   createdAt: Date;
@@ -25,11 +33,17 @@ export interface Zone {
 export interface Ward {
   id: string;
   name: string;
-  zoneId: string;
+  localGovt: string;
   adminId?: string;
   description?: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface localGovt {
+  id: string;
+  name: string;
+ 
 }
 
 export interface PendingUser {
